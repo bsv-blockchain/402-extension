@@ -6,6 +6,7 @@
   "permissions": [
     "webRequest",
     "declarativeNetRequest",
+    "storage",
     "tabs"
   ],
   "host_permissions": [
