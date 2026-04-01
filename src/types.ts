@@ -14,8 +14,6 @@ export interface PendingPayment {
   serverKey: string
   /** DNR session rule ID, set after payment headers are installed */
   ruleId: number | null
-  /** Whether the payment headers came from the cache */
-  fromCache: boolean
   /** Timestamp when this payment started processing */
   timestamp: number
 }
@@ -29,14 +27,4 @@ export interface PaymentHeaders {
   'x-bsv-prefix': string
   'x-bsv-suffix': string
   'x-bsv-vout': string
-}
-
-/**
- * A cached payment entry stored in chrome.storage.local.
- * Keyed by URL, allows reuse of payment headers on repeat
- * requests to the same resource without re-paying.
- */
-export interface CachedPayment {
-  headers: PaymentHeaders
-  timestamp: number
 }

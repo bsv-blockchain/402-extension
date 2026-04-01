@@ -1,5 +1,4 @@
 import { constructPayment } from './payment-handler.js'
-import { getCachedPayment, setCachedPayment, evictCachedPayment, pruneExpiredEntries } from './payment-cache.js'
 import type { PendingPayment, PaymentHeaders } from './types.js'
 
 // ---------------------------------------------------------------------------
@@ -86,10 +85,9 @@ async function removeRule (ruleId: number): Promise<void> {
 
 /**
  * Handle a detected 402 response:
- * 1. Check the cache for existing payment headers
- * 2. If not cached, construct payment via the BSV wallet
- * 3. Install DNR rules to attach payment headers
- * 4. Retry the navigation via chrome.tabs.update
+ * 1. Construct payment via the BSV wallet (auto-discovered substrate)
+ * 2. Install DNR rules to attach payment headers
+ * 3. Retry the navigation via chrome.tabs.update
  */
 async function handlePayment (
   tabId: number,
@@ -100,34 +98,21 @@ async function handlePayment (
   console.log(`[402-ext] Handling payment: ${sats} sats for ${url}`)
 
   try {
-    // Check cache first — reuse payment headers if available
-    let paymentHeaders = await getCachedPayment(url)
-    let fromCache = false
+    // Construct payment transaction via the wallet
+    const paymentHeaders = await constructPayment(url, sats, serverKey)
 
-    if (paymentHeaders) {
-      console.log(`[402-ext] Using cached payment for ${url}`)
-      fromCache = true
-    } else {
-      // Construct a new payment transaction via the wallet
-      paymentHeaders = await constructPayment(url, sats, serverKey)
-
-      // Check if this payment was cancelled while we were waiting for the wallet
-      if (!pendingPayments.has(tabId)) {
-        console.log(`[402-ext] Payment cancelled for tab ${tabId}`)
-        return
-      }
-
-      // Cache the payment headers for future reuse (24h TTL)
-      await setCachedPayment(url, paymentHeaders)
+    // Check if this payment was cancelled while we were waiting for the wallet
+    if (!pendingPayments.has(tabId)) {
+      console.log(`[402-ext] Payment cancelled for tab ${tabId}`)
+      return
     }
 
     // Install DNR rules so the retry request carries the payment headers
     const ruleId = await addPaymentHeaderRules(tabId, url, paymentHeaders)
 
-    // Update pending payment state with the rule ID and cache status
+    // Update pending payment state with the rule ID
     const pending = pendingPayments.get(tabId)!
     pending.ruleId = ruleId
-    pending.fromCache = fromCache
 
     console.log(`[402-ext] Payment headers installed (rule ${ruleId}), retrying ${url}`)
 
@@ -178,17 +163,10 @@ chrome.webRequest.onHeadersReceived.addListener(
     // Prevent re-entrant handling: if this tab already has a pending payment,
     // the retry itself got a 402 (payment rejected). Don't loop.
     if (pendingPayments.has(details.tabId)) {
-      const pending = pendingPayments.get(details.tabId)!
       console.warn(
         `[402-ext] Tab ${details.tabId} already has a pending payment; ` +
         `retry returned 402. Not retrying again.`
       )
-      // If we used cached headers and the server rejected them, evict the
-      // stale cache entry so the next manual visit will construct a fresh payment.
-      if (pending.fromCache) {
-        evictCachedPayment(pending.url)
-        console.log(`[402-ext] Evicted stale cache entry for ${pending.url}`)
-      }
       cleanupPayment(details.tabId)
       return
     }
@@ -225,7 +203,6 @@ chrome.webRequest.onHeadersReceived.addListener(
       sats,
       serverKey: serverValue,
       ruleId: null,
-      fromCache: false,
       timestamp: Date.now()
     })
 
@@ -320,14 +297,6 @@ setInterval(() => {
     }
   }
 }, 60_000)
-
-// Prune expired cache entries every hour
-setInterval(() => {
-  pruneExpiredEntries()
-}, 60 * 60 * 1000)
-
-// Also prune on startup
-pruneExpiredEntries()
 
 // ---------------------------------------------------------------------------
 console.log('[402-ext] BSV 402 Payments extension loaded')
