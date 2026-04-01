@@ -1,0 +1,21 @@
+{
+  "name": "402-extension",
+  "version": "0.1.0",
+  "description": "Chrome extension for automatic BRC-0121 payments via BSV wallet",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsx build.ts",
+    "watch": "tsx build.ts --watch",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@bsv/sdk": "^2"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.0.268",
+    "esbuild": "^0.21.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.5.0"
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "BSV 402 Payments",
+  "version": "0.1.0",
+  "description": "Automatic BRC-0121 payments for HTTP 402 resources via any available BSV wallet",
+  "permissions": [
+    "webRequest",
+    "declarativeNetRequest",
+    "tabs"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "dist/background.js"
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}
