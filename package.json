@@ -7,7 +7,8 @@
   "scripts": {
     "build": "tsx build.ts",
     "watch": "tsx build.ts --watch",
-    "clean": "rm -rf dist"
+    "clean": "rm -rf dist",
+    "package": "npm run build && rm -f 402-extension.zip && zip -r 402-extension.zip manifest.json dist/background.js icons/ LICENSE"
   },
   "dependencies": {
     "@bsv/sdk": "^2"

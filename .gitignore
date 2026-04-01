@@ -1,4 +1,4 @@
 node_modules/
-dist/
 *.js.map
-/.DS_Store
+*.zip
+.DS_Store
