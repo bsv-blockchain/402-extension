@@ -56,9 +56,11 @@ export async function constructPayment (
   const originator = new URL(url).origin
   const wallet = getWalletClient(originator)
 
-  // Generate random derivation parameters (BRC-29)
+  // Generate derivation parameters (BRC-29)
   const derivationPrefix = randomBase64(8)
-  const derivationSuffix = randomBase64(8)
+  const timestamp = String(Date.now())
+  // Server derives suffix as Buffer.from(time).toString('base64') — match it exactly
+  const derivationSuffix = btoa(timestamp)
 
   // Derive the payment public key using the server as counterparty
   const { publicKey: derivedPubKey } = await wallet.getPublicKey({
@@ -107,8 +109,8 @@ export async function constructPayment (
   return {
     'x-bsv-sender': senderIdentityKey,
     'x-bsv-beef': txBase64,
-    'x-bsv-prefix': derivationPrefix,
-    'x-bsv-suffix': derivationSuffix,
+    'x-bsv-nonce': derivationPrefix,
+    'x-bsv-time': timestamp,
     'x-bsv-vout': '0'
   }
 }

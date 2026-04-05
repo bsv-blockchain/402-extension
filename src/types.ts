@@ -24,7 +24,7 @@ export interface PendingPayment {
 export interface PaymentHeaders {
   'x-bsv-sender': string
   'x-bsv-beef': string
-  'x-bsv-prefix': string
-  'x-bsv-suffix': string
+  'x-bsv-nonce': string
+  'x-bsv-time': string
   'x-bsv-vout': string
 }
