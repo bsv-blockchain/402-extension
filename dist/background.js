@@ -8496,10 +8496,10 @@
       }
       if (typeof process !== "undefined" && process.release?.name === "node") {
         try {
-          const crypto2 = __require("crypto");
-          if (typeof crypto2.randomBytes === "function") {
+          const crypto = __require("crypto");
+          if (typeof crypto.randomBytes === "function") {
             this._rand = (n) => {
-              return Array.from(crypto2.randomBytes(n));
+              return Array.from(crypto.randomBytes(n));
             };
             return;
           }
@@ -18924,8 +18924,66 @@ ${t.inputTxids.map((it) => `      '${it}'`).join(",\n")}
   // node_modules/@bsv/sdk/dist/esm/src/overlay-tools/LookupResolver.js
   var defaultFetch2 = typeof globalThis !== "undefined" && typeof globalThis.fetch === "function" ? globalThis.fetch.bind(globalThis) : fetch;
 
-  // src/payment-handler.ts
+  // node_modules/@bsv/402-pay/dist/constants.js
   var BRC29_PROTOCOL_ID = [2, "3241645161d8"];
+  var HEADER_PREFIX = "x-bsv-";
+  var HEADERS = {
+    /** Server → Client: required satoshi amount */
+    SATS: `${HEADER_PREFIX}sats`,
+    /** Server → Client: server identity public key */
+    SERVER: `${HEADER_PREFIX}server`,
+    /** Client → Server: base64-encoded BEEF transaction */
+    BEEF: `${HEADER_PREFIX}beef`,
+    /** Client → Server: client identity public key */
+    SENDER: `${HEADER_PREFIX}sender`,
+    /** Client → Server: base64-encoded derivation prefix */
+    NONCE: `${HEADER_PREFIX}nonce`,
+    /** Client → Server: Unix millisecond timestamp */
+    TIME: `${HEADER_PREFIX}time`,
+    /** Client → Server: output index (decimal string) */
+    VOUT: `${HEADER_PREFIX}vout`
+  };
+
+  // node_modules/@bsv/402-pay/dist/client.js
+  async function constructPaymentHeaders(wallet, url, satoshis, serverIdentityKey) {
+    const originator = new URL(url).origin;
+    const nonce = utils_exports.toBase64(Random_default(8));
+    const time = String(Date.now());
+    const timeSuffixB64 = utils_exports.toBase64(utils_exports.toArray(time, "utf8"));
+    const { publicKey: derivedPubKey } = await wallet.getPublicKey({
+      protocolID: BRC29_PROTOCOL_ID,
+      keyID: `${nonce} ${timeSuffixB64}`,
+      counterparty: serverIdentityKey
+    }, originator);
+    const pkh = PublicKey.fromString(derivedPubKey).toHash("hex");
+    const { publicKey: senderIdentityKey } = await wallet.getPublicKey({ identityKey: true }, originator);
+    const actionResult = await wallet.createAction({
+      description: `Paid Content: ${new URL(url).pathname}`,
+      outputs: [{
+        satoshis,
+        lockingScript: `76a914${pkh}88ac`,
+        outputDescription: "402 web payment",
+        customInstructions: JSON.stringify({
+          derivationPrefix: nonce,
+          derivationSuffix: timeSuffixB64,
+          serverIdentityKey
+        }),
+        tags: ["402-payment"]
+      }],
+      labels: ["402-payment"],
+      options: { randomizeOutputs: false }
+    }, originator);
+    const txBase64 = utils_exports.toBase64(actionResult.tx);
+    return {
+      [HEADERS.BEEF]: txBase64,
+      [HEADERS.SENDER]: senderIdentityKey,
+      [HEADERS.NONCE]: nonce,
+      [HEADERS.TIME]: time,
+      [HEADERS.VOUT]: "0"
+    };
+  }
+
+  // src/payment-handler.ts
   var walletClients = /* @__PURE__ */ new Map();
   function getWalletClient(originator) {
     let client = walletClients.get(originator);
@@ -18935,61 +18993,10 @@ ${t.inputTxids.map((it) => `      '${it}'`).join(",\n")}
     }
     return client;
   }
-  function randomBase64(byteLength = 8) {
-    const bytes2 = new Uint8Array(byteLength);
-    crypto.getRandomValues(bytes2);
-    let binary = "";
-    for (let i = 0; i < bytes2.length; i++) {
-      binary += String.fromCharCode(bytes2[i]);
-    }
-    return btoa(binary);
-  }
   async function constructPayment(url, sats, serverKey) {
     const originator = new URL(url).origin;
     const wallet = getWalletClient(originator);
-    const derivationPrefix = randomBase64(8);
-    const derivationSuffix = randomBase64(8);
-    const { publicKey: derivedPubKey } = await wallet.getPublicKey({
-      protocolID: BRC29_PROTOCOL_ID,
-      keyID: `${derivationPrefix} ${derivationSuffix}`,
-      counterparty: serverKey
-    });
-    const pkh = PublicKey.fromString(derivedPubKey).toHash("hex");
-    const lockingScript = `76a914${pkh}88ac`;
-    const { publicKey: senderIdentityKey } = await wallet.getPublicKey({
-      identityKey: true
-    });
-    const actionResult = await wallet.createAction({
-      description: `Paid Content: ${new URL(url).pathname}`,
-      outputs: [{
-        satoshis: sats,
-        lockingScript,
-        outputDescription: "402 web payment",
-        customInstructions: JSON.stringify({
-          derivationPrefix,
-          derivationSuffix,
-          serverIdentityKey: serverKey
-        }),
-        tags: ["402-payment"]
-      }],
-      labels: ["402-payment"],
-      options: {
-        randomizeOutputs: false
-      }
-    });
-    const txBytes = actionResult.tx;
-    let binary = "";
-    for (let i = 0; i < txBytes.length; i++) {
-      binary += String.fromCharCode(txBytes[i]);
-    }
-    const txBase64 = btoa(binary);
-    return {
-      "x-bsv-sender": senderIdentityKey,
-      "x-bsv-beef": txBase64,
-      "x-bsv-prefix": derivationPrefix,
-      "x-bsv-suffix": derivationSuffix,
-      "x-bsv-vout": "0"
-    };
+    return constructPaymentHeaders(wallet, url, sats, serverKey);
   }
 
   // src/background.ts
@@ -19076,17 +19083,17 @@ ${t.inputTxids.map((it) => `      '${it}'`).join(",\n")}
       let serverValue;
       for (const header of responseHeaders) {
         const name = header.name.toLowerCase();
-        if (name === "x-bsv-sats") {
+        if (name === HEADERS.SATS) {
           satsValue = header.value;
-        } else if (name === "x-bsv-server") {
+        } else if (name === HEADERS.SERVER) {
           serverValue = header.value;
         }
       }
       if (!satsValue || !serverValue) {
         return;
       }
-      const sats = parseInt(satsValue, 10);
-      if (isNaN(sats) || sats <= 0) {
+      const sats = Number.parseInt(satsValue, 10);
+      if (Number.isNaN(sats) || sats <= 0) {
         console.warn(`[402-ext] Invalid x-bsv-sats value: ${satsValue}`);
         return;
       }
@@ -19106,7 +19113,7 @@ ${t.inputTxids.map((it) => `      '${it}'`).join(",\n")}
   chrome.webRequest.onCompleted.addListener(
     (details) => {
       const pending = pendingPayments.get(details.tabId);
-      if (!pending || pending.ruleId === null) return;
+      if (!pending?.ruleId) return;
       if (details.url === pending.url) {
         cleanupPayment(details.tabId);
       }

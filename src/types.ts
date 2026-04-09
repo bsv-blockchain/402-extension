@@ -17,14 +17,3 @@ export interface PendingPayment {
   /** Timestamp when this payment started processing */
   timestamp: number
 }
-
-/**
- * The set of BRC-0121 payment headers sent on the retry request.
- */
-export interface PaymentHeaders {
-  'x-bsv-sender': string
-  'x-bsv-beef': string
-  'x-bsv-nonce': string
-  'x-bsv-time': string
-  'x-bsv-vout': string
-}

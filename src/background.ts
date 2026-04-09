@@ -1,5 +1,7 @@
 import { constructPayment } from './payment-handler.js'
-import type { PendingPayment, PaymentHeaders } from './types.js'
+import type { PaymentHeaders } from '@bsv/402-pay/client'
+import type { PendingPayment } from './types.js'
+import { HEADERS } from '@bsv/402-pay'
 
 // ---------------------------------------------------------------------------
 // State
@@ -178,9 +180,9 @@ chrome.webRequest.onHeadersReceived.addListener(
 
     for (const header of responseHeaders) {
       const name = header.name.toLowerCase()
-      if (name === 'x-bsv-sats') {
+      if (name === HEADERS.SATS) {
         satsValue = header.value
-      } else if (name === 'x-bsv-server') {
+      } else if (name === HEADERS.SERVER) {
         serverValue = header.value
       }
     }
@@ -190,8 +192,8 @@ chrome.webRequest.onHeadersReceived.addListener(
       return
     }
 
-    const sats = parseInt(satsValue, 10)
-    if (isNaN(sats) || sats <= 0) {
+    const sats = Number.parseInt(satsValue, 10)
+    if (Number.isNaN(sats) || sats <= 0) {
       console.warn(`[402-ext] Invalid x-bsv-sats value: ${satsValue}`)
       return
     }
@@ -225,7 +227,7 @@ chrome.webRequest.onHeadersReceived.addListener(
 chrome.webRequest.onCompleted.addListener(
   (details) => {
     const pending = pendingPayments.get(details.tabId)
-    if (!pending || pending.ruleId === null) return
+    if (!pending?.ruleId) return
 
     // Only clean up if this completion is for the URL we're paying for
     if (details.url === pending.url) {

@@ -11,6 +11,7 @@
     "package": "npm run build && rm -f 402-extension.zip && zip -r 402-extension.zip manifest.json dist/background.js icons/ LICENSE"
   },
   "dependencies": {
+    "@bsv/402-pay": "^0.1.3",
     "@bsv/sdk": "^2.0.13"
   },
   "devDependencies": {
