@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "BSV 402 Payments",
   "version": "0.2.1",
-  "description": "Automatic BRC-0121 payments for HTTP 402 resources via any available BSV wallet",
+  "description": "Automatically pays HTTP 402 responses using BSV micropayments (BRC-0121). Constructs and transmits a BSV blockchain transaction when a site requests payment. No personal data, bank details, or card information is collected or stored.",
   "background": {
     "scripts": [
       "dist/background.js"
@@ -24,7 +24,15 @@
   "browser_specific_settings": {
     "gecko": {
       "id": "bsv-402-payments@bsvblockchain.org",
-      "strict_min_version": "115.0"
+      "strict_min_version": "115.0",
+      "data_collection_permissions": {
+        "required": [
+          "financialAndPaymentInfo"
+        ],
+        "optional": [
+          "technicalAndInteraction"
+        ]
+      }
     }
   }
 }
