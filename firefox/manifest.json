@@ -3,20 +3,28 @@
   "name": "BSV 402 Payments",
   "version": "0.2.1",
   "description": "Automatic BRC-0121 payments for HTTP 402 resources via any available BSV wallet",
+  "background": {
+    "scripts": [
+      "dist/background.js"
+    ]
+  },
   "permissions": [
     "webRequest",
-    "declarativeNetRequest",
+    "webRequestBlocking",
     "tabs"
   ],
   "host_permissions": [
     "<all_urls>"
   ],
-  "background": {
-    "service_worker": "dist/background.js"
-  },
   "icons": {
     "16": "icons/icon16.png",
     "48": "icons/icon48.png",
     "128": "icons/icon128.png"
+  },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "bsv-402-payments@bsvblockchain.org",
+      "strict_min_version": "115.0"
+    }
   }
 }

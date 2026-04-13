@@ -1,7 +1,7 @@
 {
-  "name": "402-extension",
+  "name": "402-extension-firefox",
   "version": "0.2.1",
-  "description": "Chrome extension for automatic BRC-0121 payments via BSV wallet",
+  "description": "Firefox extension for automatic BRC-0121 payments via BSV wallet",
   "private": true,
   "type": "module",
   "scripts": {
@@ -9,14 +9,14 @@
     "watch": "tsx build.ts --watch",
     "clean": "rm -rf dist",
     "sync-version": "node -e \"const p=JSON.parse(require('fs').readFileSync('package.json'));const m=JSON.parse(require('fs').readFileSync('manifest.json'));m.version=p.version;require('fs').writeFileSync('manifest.json',JSON.stringify(m,null,2)+'\\n')\"",
-    "package": "npm run sync-version && npm run build && rm -f 402-extension.zip && zip -r 402-extension.zip manifest.json dist/background.js icons/ LICENSE"
+    "package": "npm run sync-version && npm run build && rm -f 402-extension-firefox.xpi && zip -r 402-extension-firefox.xpi manifest.json dist/background.js icons/"
   },
   "dependencies": {
     "@bsv/402-pay": "^0.1.3",
     "@bsv/sdk": "^2.0.13"
   },
   "devDependencies": {
-    "@types/chrome": "^0.0.268",
+    "@types/firefox-webext-browser": "^120.0.0",
     "esbuild": "^0.25.0",
     "tsx": "^4.19.0",
     "typescript": "^5.5.0"
