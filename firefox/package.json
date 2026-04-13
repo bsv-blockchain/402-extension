@@ -9,7 +9,8 @@
     "watch": "tsx build.ts --watch",
     "clean": "rm -rf dist",
     "sync-version": "node -e \"const p=JSON.parse(require('fs').readFileSync('package.json'));const m=JSON.parse(require('fs').readFileSync('manifest.json'));m.version=p.version;require('fs').writeFileSync('manifest.json',JSON.stringify(m,null,2)+'\\n')\"",
-    "package": "npm run sync-version && npm run build && rm -f 402-extension-firefox.xpi && zip -r 402-extension-firefox.xpi manifest.json dist/background.js icons/"
+    "package": "npm run sync-version && npm run build && rm -f 402-extension-firefox.xpi && zip -r 402-extension-firefox.xpi manifest.json dist/background.js icons/",
+    "package-sources": "rm -f 402-extension-firefox-sources.zip && zip -r 402-extension-firefox-sources.zip src/ build.ts package.json package-lock.json tsconfig.json manifest.json FOR_REVIEWERS.md --exclude '*.DS_Store'"
   },
   "dependencies": {
     "@bsv/402-pay": "^0.1.3",
