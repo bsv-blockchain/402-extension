@@ -13,8 +13,8 @@
     "package-sources": "rm -f 402-extension-firefox-sources.zip && zip -r 402-extension-firefox-sources.zip src/ build.ts package.json package-lock.json tsconfig.json manifest.json FOR_REVIEWERS.md --exclude '*.DS_Store'"
   },
   "dependencies": {
-    "@bsv/402-pay": "^0.1.3",
-    "@bsv/sdk": "^2.0.13"
+    "@bsv/402-pay": "^0.3.0",
+    "@bsv/sdk": "^2.5.0"
   },
   "devDependencies": {
     "@types/firefox-webext-browser": "^120.0.0",

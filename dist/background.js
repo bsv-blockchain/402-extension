@@ -12,8 +12,15 @@
       __defProp(target, name, { get: all[name], enumerable: true });
   };
 
+  // node_modules/@bsv/sdk/dist/esm/src/primitives/ECDSA.js
+  var ECDSA_exports = {};
+  __export(ECDSA_exports, {
+    sign: () => sign,
+    verify: () => verify
+  });
+
   // node_modules/@bsv/sdk/dist/esm/src/primitives/BigNumber.js
-  var BufferCtor = typeof globalThis !== "undefined" ? globalThis.Buffer : void 0;
+  var BufferCtor = globalThis.Buffer;
   var CAN_USE_BUFFER = BufferCtor != null && typeof BufferCtor.from === "function";
   var HEX_CHAR_TO_VALUE = new Int8Array(256).fill(-1);
   for (let i = 0; i < 10; i++) {
@@ -154,15 +161,19 @@
     static MIN_SAFE_INTEGER_BIGINT = BigInt(Number.MIN_SAFE_INTEGER);
     static MAX_IMULN_ARG = 67108864 - 1;
     static MAX_NUMBER_CONSTRUCTOR_MAG_BIGINT = (1n << 53n) - 1n;
-    _magnitude;
-    _sign;
-    _nominalWordLength;
+    // About 3.25 MiB of mathematical payload. Legitimate cryptographic values
+    // are orders of magnitude smaller; this cap prevents hostile sparse-length
+    // metadata from causing an unbounded dense JavaScript array allocation.
+    static MAX_NOMINAL_WORD_LENGTH = 1048576;
+    _magnitude = 0n;
+    _sign = 0;
+    _nominalWordLength = 1;
     /**
      * Reduction context of the big number.
      *
      * @property red
      */
-    red;
+    red = null;
     /**
      * Negative flag. Indicates whether the big number is a negative number.
      * - If 0, the number is positive.
@@ -202,11 +213,14 @@
      * @property words
      */
     get words() {
+      if (!Number.isSafeInteger(this._nominalWordLength) || this._nominalWordLength < 1 || this._nominalWordLength > _BigNumber.MAX_NOMINAL_WORD_LENGTH) {
+        throw new Error("BigNumber word length exceeds the supported limit");
+      }
       const computed = this._computedWordsArray;
       if (this._nominalWordLength <= computed.length) {
         return computed;
       }
-      const paddedWords = new Array(this._nominalWordLength).fill(0);
+      const paddedWords = Array.from({ length: this._nominalWordLength }).fill(0);
       for (let i = 0; i < computed.length; i++) {
         paddedWords[i] = computed[i];
       }
@@ -220,7 +234,7 @@
       let newMagnitude = 0n;
       const len = newWords.length > 0 ? newWords.length : 1;
       for (let i = len - 1; i >= 0; i--) {
-        const wordVal = newWords[i] === void 0 ? 0 : newWords[i];
+        const wordVal = newWords[i] ?? 0;
         newMagnitude = newMagnitude << _BigNumber.WORD_SIZE_BIGINT | BigInt(wordVal & Number(_BigNumber.WORD_MASK));
       }
       this._magnitude = newMagnitude;
@@ -278,27 +292,15 @@
      * @param endian - The endianness provided. By default is 'big endian'.
      */
     constructor(number = 0, base = 10, endian = "be") {
-      this._magnitude = 0n;
-      this._sign = 0;
-      this._nominalWordLength = 1;
-      this.red = null;
-      if (number === void 0)
-        number = 0;
-      if (number === null) {
-        this._initializeState(0n, 0);
-        return;
-      }
+      number ??= 0;
       if (typeof number === "bigint") {
         this._initializeState(number < 0n ? -number : number, number < 0n ? 1 : 0);
         this.normSign();
         return;
       }
-      let effectiveBase = base;
-      let effectiveEndian = endian;
-      if (base === "le" || base === "be") {
-        effectiveEndian = base;
-        effectiveBase = 10;
-      }
+      const baseIsEndian = base === "le" || base === "be";
+      const effectiveBase = baseIsEndian ? 10 : base;
+      const effectiveEndian = baseIsEndian ? base : endian;
       if (typeof number === "number") {
         this.initNumber(number, effectiveEndian);
         return;
@@ -308,74 +310,84 @@
         return;
       }
       if (typeof number === "string") {
-        if (effectiveBase === "hex")
-          effectiveBase = 16;
-        this.assert(typeof effectiveBase === "number" && effectiveBase === (effectiveBase | 0) && effectiveBase >= 2 && effectiveBase <= 36, "Base must be an integer between 2 and 36");
-        const originalNumberStr = number.toString().replace(/\s+/g, "");
-        let start = 0;
-        let sign2 = 0;
-        if (originalNumberStr.startsWith("-")) {
-          start++;
-          sign2 = 1;
-        } else if (originalNumberStr.startsWith("+")) {
-          start++;
-        }
-        const numStr = originalNumberStr.substring(start);
-        if (numStr.length === 0) {
-          this._initializeState(0n, sign2 === 1 && originalNumberStr.startsWith("-") ? 1 : 0);
-          this.normSign();
-          return;
-        }
-        if (effectiveBase === 16) {
-          let tempMagnitude;
-          if (effectiveEndian === "le") {
-            const bytes2 = [];
-            let hexStr = numStr;
-            if (hexStr.length % 2 !== 0)
-              hexStr = "0" + hexStr;
-            for (let i = 0; i < hexStr.length; i += 2) {
-              const byteHex = hexStr.substring(i, i + 2);
-              const byteVal = parseInt(byteHex, 16);
-              if (isNaN(byteVal))
-                throw new Error("Invalid character in " + hexStr);
-              bytes2.push(byteVal);
-            }
-            this.initArray(bytes2, "le");
-            this._sign = sign2;
-            this.normSign();
-            return;
-          } else {
-            try {
-              tempMagnitude = BigInt("0x" + numStr);
-            } catch (e) {
-              throw new Error("Invalid character in " + numStr);
-            }
-          }
-          this._initializeState(tempMagnitude, sign2);
-          this.normSign();
-        } else {
-          try {
-            this._parseBaseString(numStr, effectiveBase);
-            this._sign = sign2;
-            this.normSign();
-            if (effectiveEndian === "le") {
-              const currentSign = this._sign;
-              this.initArray(this.toArray("be"), "le");
-              this._sign = currentSign;
-              this.normSign();
-            }
-          } catch (err) {
-            const error = err;
-            if (error.message.includes("Invalid character in string") || error.message.includes("Invalid digit for base") || error.message.startsWith("Invalid character:")) {
-              throw new Error("Invalid character");
-            }
-            throw error;
-          }
-        }
-      } else if (number !== 0) {
+        this._initFromString(number, effectiveBase, effectiveEndian);
+        return;
+      }
+      if (number !== 0) {
         this.assert(false, "Unsupported input type for BigNumber constructor");
       } else {
         this._initializeState(0n, 0);
+      }
+    }
+    _initFromString(number, effectiveBase, effectiveEndian) {
+      if (effectiveBase === "hex")
+        effectiveBase = 16;
+      this.assert(typeof effectiveBase === "number" && effectiveBase === Math.trunc(effectiveBase) && effectiveBase >= 2 && effectiveBase <= 36, "Base must be an integer between 2 and 36");
+      const originalNumberStr = number.toString().replace(/\s+/g, "");
+      let start = 0;
+      let sign2 = 0;
+      if (originalNumberStr.startsWith("-")) {
+        start++;
+        sign2 = 1;
+      } else if (originalNumberStr.startsWith("+")) {
+        start++;
+      }
+      const numStr = originalNumberStr.substring(start);
+      if (numStr.length === 0) {
+        this._initializeState(0n, sign2 === 1 && originalNumberStr.startsWith("-") ? 1 : 0);
+        this.normSign();
+        return;
+      }
+      if (effectiveBase === 16) {
+        this._initFromHexString(numStr, sign2, effectiveEndian);
+      } else {
+        this._initFromNonHexString(numStr, effectiveBase, sign2, effectiveEndian);
+      }
+    }
+    _initFromHexString(numStr, sign2, effectiveEndian) {
+      if (effectiveEndian === "le") {
+        const bytes2 = [];
+        let hexStr = numStr;
+        if (hexStr.length % 2 !== 0)
+          hexStr = "0" + hexStr;
+        for (let i = 0; i < hexStr.length; i += 2) {
+          const byteHex = hexStr.substring(i, i + 2);
+          const byteVal = Number.parseInt(byteHex, 16);
+          if (Number.isNaN(byteVal))
+            throw new Error("Invalid character in " + hexStr);
+          bytes2.push(byteVal);
+        }
+        this.initArray(bytes2, "le");
+        this._sign = sign2;
+        this.normSign();
+      } else {
+        let tempMagnitude;
+        try {
+          tempMagnitude = BigInt("0x" + numStr);
+        } catch {
+          throw new Error("Invalid character in " + numStr);
+        }
+        this._initializeState(tempMagnitude, sign2);
+        this.normSign();
+      }
+    }
+    _initFromNonHexString(numStr, base, sign2, effectiveEndian) {
+      try {
+        this._parseBaseString(numStr, base);
+        this._sign = sign2;
+        this.normSign();
+        if (effectiveEndian === "le") {
+          const currentSign = this._sign;
+          this.initArray(this.toArray("be"), "le");
+          this._sign = currentSign;
+          this.normSign();
+        }
+      } catch (err) {
+        const error = err;
+        if (error.message.includes("Invalid character in string") || error.message.includes("Invalid digit for base") || error.message.startsWith("Invalid character:")) {
+          throw new Error("Invalid character");
+        }
+        throw error;
       }
     }
     _bigIntToStringInBase(num, base) {
@@ -394,11 +406,6 @@
       return result;
     }
     _parseBaseString(numberStr, base) {
-      if (numberStr.length === 0) {
-        this._magnitude = 0n;
-        this._finishInitialization();
-        return;
-      }
       this._magnitude = 0n;
       const bigBase = BigInt(base);
       let groupSize = _BigNumber.groupSizes[base];
@@ -430,7 +437,7 @@
     _parseBaseWord(str, base) {
       let r2 = 0;
       for (let i = 0; i < str.length; i++) {
-        const charCode = str.charCodeAt(i);
+        const charCode = str.codePointAt(i);
         let digitVal;
         if (charCode >= 48 && charCode <= 57)
           digitVal = charCode - 48;
@@ -484,8 +491,8 @@
       }
       let magnitude = 0n;
       if (endian === "be") {
-        for (let i = 0; i < bytes2.length; i++)
-          magnitude = magnitude << 8n | BigInt(bytes2[i] & 255);
+        for (const byte of bytes2)
+          magnitude = magnitude << 8n | BigInt(byte & 255);
       } else {
         for (let i = bytes2.length - 1; i >= 0; i--)
           magnitude = magnitude << 8n | BigInt(bytes2[i] & 255);
@@ -511,7 +518,7 @@
       return r2;
     }
     expand(size) {
-      this.assert(size >= 0, "Expand size must be non-negative");
+      this.assert(Number.isSafeInteger(size) && size >= 0 && size <= _BigNumber.MAX_NOMINAL_WORD_LENGTH, "Expand size must be a non-negative safe integer within the supported word limit");
       this._nominalWordLength = Math.max(this._nominalWordLength, size, 1);
       return this;
     }
@@ -520,17 +527,30 @@
       return this.normSign();
     }
     normSign() {
-      if (this._magnitude === 0n)
+      if (this._magnitude === 0n) {
         this._sign = 0;
+      }
       return this;
     }
     inspect() {
-      return (this.red !== null ? "<BN-R: " : "<BN: ") + this.toString(16) + ">";
+      return (this.red === null ? "<BN: " : "<BN-R: ") + this.toString(16) + ">";
     }
     _getMinimalHex() {
       if (this._magnitude === 0n)
         return "0";
       return this._magnitude.toString(16);
+    }
+    _toHexString(padding) {
+      let hexStr = this._getMinimalHex();
+      if (padding > 1) {
+        if (hexStr !== "0" && hexStr.length % 2 !== 0) {
+          hexStr = "0" + hexStr;
+        }
+        while (hexStr.length % padding !== 0) {
+          hexStr = "0" + hexStr;
+        }
+      }
+      return (this.isNeg() ? "-" : "") + hexStr;
     }
     /**
      * Converts the BigNumber instance to a string representation.
@@ -542,16 +562,7 @@
      */
     toString(base = 10, padding = 1) {
       if (base === 16 || base === "hex") {
-        let hexStr = this._getMinimalHex();
-        if (padding > 1) {
-          if (hexStr !== "0" && hexStr.length % 2 !== 0) {
-            hexStr = "0" + hexStr;
-          }
-          while (hexStr.length % padding !== 0) {
-            hexStr = "0" + hexStr;
-          }
-        }
-        return (this.isNeg() ? "-" : "") + hexStr;
+        return this._toHexString(padding);
       }
       if (typeof base !== "number" || base < 2 || base > 36 || base % 1 !== 0)
         throw new Error("Base should be an integer between 2 and 36");
@@ -559,12 +570,7 @@
     }
     toBaseString(base, padding) {
       if (this._magnitude === 0n) {
-        let out2 = "0";
-        if (padding > 1) {
-          while (out2.length < padding)
-            out2 = "0" + out2;
-        }
-        return out2;
+        return _BigNumber._paddedZero(padding);
       }
       let groupSize = _BigNumber.groupSizes[base];
       let groupBaseBigInt = BigInt(_BigNumber.groupBases[base]);
@@ -580,24 +586,30 @@
         const remainder = tempMag % groupBaseBigInt;
         tempMag /= groupBaseBigInt;
         const chunkStr = this._bigIntToStringInBase(remainder, base);
-        if (tempMag > 0n) {
-          const zerosToPrepend = groupSize - chunkStr.length;
-          if (zerosToPrepend > 0 && zerosToPrepend < _BigNumber.zeros.length) {
-            out = _BigNumber.zeros[zerosToPrepend] + chunkStr + out;
-          } else if (zerosToPrepend > 0) {
-            out = "0".repeat(zerosToPrepend) + chunkStr + out;
-          } else {
-            out = chunkStr + out;
-          }
-        } else {
-          out = chunkStr + out;
-        }
+        out = (tempMag > 0n ? this._zeroPaddedChunk(chunkStr, groupSize) : chunkStr) + out;
       }
       if (padding > 0) {
         while (out.length < padding)
           out = "0" + out;
       }
       return (this._sign === 1 ? "-" : "") + out;
+    }
+    static _paddedZero(padding) {
+      let out = "0";
+      if (padding > 1) {
+        while (out.length < padding)
+          out = "0" + out;
+      }
+      return out;
+    }
+    /** Returns a chunk string zero-padded to groupSize (used by toBaseString for interior chunks). */
+    _zeroPaddedChunk(chunkStr, groupSize) {
+      const zerosToPrepend = groupSize - chunkStr.length;
+      if (zerosToPrepend <= 0)
+        return chunkStr;
+      if (zerosToPrepend < _BigNumber.zeros.length)
+        return _BigNumber.zeros[zerosToPrepend] + chunkStr;
+      return "0".repeat(zerosToPrepend) + chunkStr;
     }
     /**
      * Converts the BigNumber instance to a JavaScript number.
@@ -636,7 +648,7 @@
       let tempMag = this._magnitude;
       let position = isLE ? 0 : res.length - 1;
       const increment = isLE ? 1 : -1;
-      for (let k = 0; k < res.length; ++k) {
+      for (const _byte of res) {
         if (tempMag === 0n && position >= 0 && position < res.length) {
           res[position] = 0;
         } else if (position >= 0 && position < res.length) {
@@ -662,7 +674,7 @@
       const reqLength = length ?? Math.max(1, actualByteLength);
       this.assert(actualByteLength <= reqLength, "byte array longer than desired length");
       this.assert(reqLength > 0, "Requested array length <= 0");
-      const res = new Array(reqLength).fill(0);
+      const res = Array.from({ length: reqLength }).fill(0);
       if (this._magnitude === 0n && reqLength > 0)
         return res;
       if (this._magnitude === 0n && reqLength === 0)
@@ -677,8 +689,9 @@
      * @returns The bit length of the BigNumber.
      */
     bitLength() {
-      if (this._magnitude === 0n)
+      if (this._magnitude === 0n) {
         return 0;
+      }
       return this._magnitude.toString(2).length;
     }
     /**
@@ -692,10 +705,10 @@
       const len = num.bitLength();
       if (len === 0)
         return [];
-      const w = new Array(len);
+      const w = Array.from({ length: len });
       const mag = num._magnitude;
       for (let bit = 0; bit < len; bit++) {
-        w[bit] = (mag >> BigInt(bit) & 1n) !== 0n ? 1 : 0;
+        w[bit] = (mag >> BigInt(bit) & 1n) === 0n ? 0 : 1;
       }
       return w;
     }
@@ -734,8 +747,9 @@
      * @returns The byte length of the BigNumber.
      */
     byteLength() {
-      if (this._magnitude === 0n)
+      if (this._magnitude === 0n) {
         return 0;
+      }
       return Math.ceil(this.bitLength() / 8);
     }
     _getSignedValue() {
@@ -783,8 +797,9 @@
       return this.clone().ineg();
     }
     ineg() {
-      if (this._magnitude !== 0n)
+      if (this._magnitude !== 0n) {
         this._sign = this._sign === 1 ? 0 : 1;
+      }
       return this;
     }
     _iuop(num, op, isXor = false) {
@@ -821,8 +836,9 @@
       return this._iop(num, (a, b) => a ^ b, true);
     }
     _uop_new(num, opName) {
-      if (this.length >= num.length)
+      if (this.length >= num.length) {
         return this.clone()[opName](num);
+      }
       return num.clone()[opName](this);
     }
     or(num) {
@@ -1057,26 +1073,28 @@
       this.assert(!num.isZero(), "Division by zero");
       if (this.isZero()) {
         const z = new _BigNumber(0n);
-        return { div: mode !== "mod" ? z : null, mod: mode !== "div" ? z : null };
+        return { div: mode === "mod" ? null : z, mod: mode === "div" ? null : z };
       }
       const tV = this._getSignedValue();
       const nV = num._getSignedValue();
-      let dV = null;
-      let mV = null;
-      if (mode !== "mod")
-        dV = tV / nV;
-      if (mode !== "div") {
-        mV = tV % nV;
-        if (positive === true && mV < 0n)
-          mV += nV < 0n ? -nV : nV;
-      }
-      const rd = dV !== null ? new _BigNumber(0n) : null;
-      if (rd !== null && dV !== null)
-        rd._setValueFromSigned(dV);
-      const rm = mV !== null ? new _BigNumber(0n) : null;
-      if (rm !== null && mV !== null)
-        rm._setValueFromSigned(mV);
-      return { div: rd, mod: rm };
+      const dV = mode !== "mod" ? tV / nV : null;
+      const mV = this._computeMod(tV, nV, mode, positive);
+      return { div: this._bigNumberFromSigned(dV), mod: this._bigNumberFromSigned(mV) };
+    }
+    _computeMod(tV, nV, mode, positive) {
+      if (mode === "div")
+        return null;
+      let mV = tV % nV;
+      if (positive === true && mV < 0n)
+        mV += nV < 0n ? -nV : nV;
+      return mV;
+    }
+    _bigNumberFromSigned(v) {
+      if (v === null)
+        return null;
+      const r2 = new _BigNumber(0n);
+      r2._setValueFromSigned(v);
+      return r2;
     }
     div(num) {
       return this.divmod(num, "div", false).div;
@@ -1210,26 +1228,32 @@
       this.assert(Math.abs(num) <= _BigNumber.MAX_IMULN_ARG, "Number is too big");
       const tV = this._getSignedValue();
       const nV = BigInt(num);
-      if (tV < nV)
+      if (tV < nV) {
         return -1;
-      if (tV > nV)
+      }
+      if (tV > nV) {
         return 1;
+      }
       return 0;
     }
     cmp(num) {
       const tV = this._getSignedValue();
       const nV = num._getSignedValue();
-      if (tV < nV)
+      if (tV < nV) {
         return -1;
-      if (tV > nV)
+      }
+      if (tV > nV) {
         return 1;
+      }
       return 0;
     }
     ucmp(num) {
-      if (this._magnitude < num._magnitude)
+      if (this._magnitude < num._magnitude) {
         return -1;
-      if (this._magnitude > num._magnitude)
+      }
+      if (this._magnitude > num._magnitude) {
         return 1;
+      }
       return 0;
     }
     gtn(num) {
@@ -1433,17 +1457,16 @@
         sign2 = 1;
         beBytes[0] &= 127;
       }
-      let magnitude = 0n;
+      let hexStr;
       if (CAN_USE_BUFFER) {
-        const hex = BufferCtor.from(beBytes).toString("hex");
-        magnitude = hex.length === 0 ? 0n : BigInt("0x" + hex);
+        hexStr = BufferCtor.from(beBytes).toString("hex");
       } else {
-        let hex = "";
+        hexStr = "";
         for (const byte of beBytes) {
-          hex += byte < 16 ? "0" + byte.toString(16) : byte.toString(16);
+          hexStr += byte < 16 ? "0" + byte.toString(16) : byte.toString(16);
         }
-        magnitude = hex.length === 0 ? 0n : BigInt("0x" + hex);
       }
+      const magnitude = hexStr.length === 0 ? 0n : BigInt("0x" + hexStr);
       const r2 = new _BigNumber(0n);
       r2._initializeState(magnitude, sign2);
       return r2;
@@ -1463,24 +1486,24 @@
       if (hex.length % 2 !== 0)
         hex = "0" + hex;
       const byteLen = hex.length / 2;
-      const bytes2 = new Array(byteLen);
+      const bytes2 = Array.from({ length: byteLen });
       for (let i = 0, j = 0; i < hex.length; i += 2) {
-        const high = HEX_CHAR_TO_VALUE[hex.charCodeAt(i)];
-        const low = HEX_CHAR_TO_VALUE[hex.charCodeAt(i + 1)];
+        const high = HEX_CHAR_TO_VALUE[hex.codePointAt(i)];
+        const low = HEX_CHAR_TO_VALUE[hex.codePointAt(i + 1)];
         bytes2[j++] = (high & 15) << 4 | low & 15;
       }
       let result;
       if (this._sign === 1) {
-        if ((bytes2[0] & 128) !== 0) {
-          result = [128, ...bytes2];
-        } else {
+        if ((bytes2[0] & 128) === 0) {
           result = bytes2.slice();
           result[0] |= 128;
+        } else {
+          result = [128, ...bytes2];
         }
-      } else if ((bytes2[0] & 128) !== 0) {
-        result = [0, ...bytes2];
-      } else {
+      } else if ((bytes2[0] & 128) === 0) {
         result = bytes2.slice();
+      } else {
+        result = [0, ...bytes2];
       }
       return endian === "little" ? result.reverse() : result;
     }
@@ -1536,14 +1559,6 @@
       }
       mB = mB.slice(firstNonZeroIdx);
       let nSize = mB.length;
-      if (nSize === 0 && !bnAbs.isZero()) {
-        mB = [0];
-        nSize = 1;
-      }
-      if (bnAbs.isZero()) {
-        nSize = 0;
-        mB = [];
-      }
       let nWordNum;
       if (nSize === 0) {
         nWordNum = 0;
@@ -1580,8 +1595,8 @@
       if (num.length === 0)
         return new _BigNumber(0n);
       if (requireMinimal) {
-        if ((num[num.length - 1] & 127) === 0) {
-          if (num.length <= 1 || (num[num.length - 2] & 128) === 0) {
+        if ((num.at(-1) & 127) === 0) {
+          if (num.length <= 1 || (num.at(-2) & 128) === 0) {
             throw new Error("non-minimally encoded script number");
           }
         }
@@ -1612,7 +1627,7 @@
      * does not provide constant-time guarantees. This implementation is suitable
      * for browser and single-tenant environments but is not hardened against
      * high-resolution timing attacks in shared CPU contexts.
-    */
+     */
     _invmp(p) {
       this.assert(p._sign === 0, "p must not be negative for _invmp");
       this.assert(!p.isZero(), "p must not be zero for _invmp");
@@ -1776,13 +1791,13 @@
       const inputWords = input.words;
       const inputNominalLength = input.length;
       const outLen = Math.min(inputNominalLength, 9);
-      const tempOutputWords = new Array(outLen + (inputNominalLength > 9 ? 1 : 0)).fill(0);
+      const tempOutputWords = Array.from({ length: outLen + (inputNominalLength > 9 ? 1 : 0) }, () => 0);
       for (let i = 0; i < outLen; i++) {
         tempOutputWords[i] = inputWords[i];
       }
       let currentOutputWordCount = outLen;
       if (inputNominalLength <= 9) {
-        const finalOutputWords2 = new Array(currentOutputWordCount);
+        const finalOutputWords2 = Array.from({ length: currentOutputWordCount }, () => 0);
         for (let i = 0; i < currentOutputWordCount; ++i)
           finalOutputWords2[i] = tempOutputWords[i];
         output.words = finalOutputWords2;
@@ -1791,14 +1806,14 @@
       }
       let prev = inputWords[9];
       tempOutputWords[currentOutputWordCount++] = prev & mask;
-      const finalOutputWords = new Array(currentOutputWordCount);
+      const finalOutputWords = Array.from({ length: currentOutputWordCount }, () => 0);
       for (let i = 0; i < currentOutputWordCount; ++i)
         finalOutputWords[i] = tempOutputWords[i];
       output.words = finalOutputWords;
-      const tempInputNewWords = new Array(Math.max(1, inputNominalLength - 9)).fill(0);
+      const tempInputNewWords = Array.from({ length: Math.max(1, inputNominalLength - 9) }, () => 0);
       let currentInputNewWordCount = 0;
       for (let i = 10; i < inputNominalLength; i++) {
-        const next = inputWords[i] | 0;
+        const next = Math.trunc(inputWords[i]);
         if (currentInputNewWordCount < tempInputNewWords.length) {
           tempInputNewWords[currentInputNewWordCount++] = (next & mask) << 4 | prev >>> 22;
         }
@@ -1809,7 +1824,7 @@
         tempInputNewWords[currentInputNewWordCount++] = prev;
       } else if (prev !== 0 && tempInputNewWords.length > 0) {
       }
-      const finalInputNewWords = new Array(currentInputNewWordCount);
+      const finalInputNewWords = Array.from({ length: currentInputNewWordCount }, () => 0);
       for (let i = 0; i < currentInputNewWordCount; ++i)
         finalInputNewWords[i] = tempInputNewWords[i];
       input.words = finalInputNewWords;
@@ -1830,16 +1845,16 @@
       const currentWords = num.words;
       const originalNominalLength = num.length;
       const newNominalLength = originalNominalLength + 2;
-      const tempWords = new Array(newNominalLength).fill(0);
+      const tempWords = Array.from({ length: newNominalLength }, () => 0);
       for (let i = 0; i < originalNominalLength; i++) {
         tempWords[i] = currentWords[i];
       }
       let lo = 0;
       for (let i = 0; i < newNominalLength; i++) {
-        const w = tempWords[i] | 0;
+        const w = Math.trunc(tempWords[i]);
         lo += w * 977;
         tempWords[i] = lo & 67108863;
-        lo = w * 64 + (lo / 67108864 | 0);
+        lo = w * 64 + Math.trunc(lo / 67108864);
       }
       num.words = tempWords;
       return num;
@@ -2186,8 +2201,9 @@
       while (t.cmp(one) !== 0) {
         let tmp = t;
         let i = 0;
-        for (; tmp.cmp(one) !== 0; i++) {
+        while (tmp.cmp(one) !== 0) {
           tmp = tmp.redSqr();
+          i++;
         }
         this.assert(i < m);
         const b = this.pow(c, new BigNumber(1).iushln(m - i - 1));
@@ -2413,377 +2429,6 @@
     }
   };
 
-  // node_modules/@bsv/sdk/dist/esm/src/primitives/BasePoint.js
-  var BasePoint = class {
-    curve;
-    type;
-    precomputed;
-    constructor(type) {
-      this.curve = new Curve();
-      this.type = type;
-      this.precomputed = null;
-    }
-  };
-
-  // node_modules/@bsv/sdk/dist/esm/src/primitives/JacobianPoint.js
-  var JacobianPoint = class _JacobianPoint extends BasePoint {
-    x;
-    y;
-    z;
-    zOne;
-    /**
-     * Constructs a new `JacobianPoint` instance.
-     *
-     * @param x - If `null`, the x-coordinate will default to the curve's defined 'one' constant.
-     * If `x` is not a BigNumber, `x` will be converted to a `BigNumber` assuming it is a hex string.
-     *
-     * @param y - If `null`, the y-coordinate will default to the curve's defined 'one' constant.
-     * If `y` is not a BigNumber, `y` will be converted to a `BigNumber` assuming it is a hex string.
-     *
-     * @param z - If `null`, the z-coordinate will default to 0.
-     * If `z` is not a BigNumber, `z` will be converted to a `BigNumber` assuming it is a hex string.
-     *
-     * @example
-     * const pointJ1 = new JacobianPoint(null, null, null); // creates point at infinity
-     * const pointJ2 = new JacobianPoint('3', '4', '1'); // creates point (3, 4, 1)
-     */
-    constructor(x, y, z) {
-      super("jacobian");
-      if (x === null && y === null && z === null) {
-        this.x = this.curve.one;
-        this.y = this.curve.one;
-        this.z = new BigNumber(0);
-      } else {
-        if (!BigNumber.isBN(x)) {
-          x = new BigNumber(x, 16);
-        }
-        this.x = x;
-        if (!BigNumber.isBN(y)) {
-          y = new BigNumber(y, 16);
-        }
-        this.y = y;
-        if (!BigNumber.isBN(z)) {
-          z = new BigNumber(z, 16);
-        }
-        this.z = z;
-      }
-      if (this.x.red == null) {
-        this.x = this.x.toRed(this.curve.red);
-      }
-      if (this.y.red == null) {
-        this.y = this.y.toRed(this.curve.red);
-      }
-      if (this.z.red == null) {
-        this.z = this.z.toRed(this.curve.red);
-      }
-      this.zOne = this.z === this.curve.one;
-      if (this.isInfinity()) {
-        this.x = this.curve.one;
-        this.y = this.curve.one;
-        this.z = new BigNumber(0).toRed(this.curve.red);
-        this.zOne = false;
-      }
-    }
-    /**
-     * Converts the `JacobianPoint` object instance to standard affine `Point` format and returns `Point` type.
-     *
-     * @returns The `Point`(affine) object representing the same point as the original `JacobianPoint`.
-     *
-     * If the initial `JacobianPoint` represents point at infinity, an instance of `Point` at infinity is returned.
-     *
-     * @example
-     * const pointJ = new JacobianPoint('3', '4', '1');
-     * const pointP = pointJ.toP();  // The point in affine coordinates.
-     */
-    toP() {
-      if (this.isInfinity()) {
-        return new Point(null, null);
-      }
-      const zinv = this.z.redInvm();
-      const zinv2 = zinv.redSqr();
-      const ax = this.x.redMul(zinv2);
-      const ay = this.y.redMul(zinv2).redMul(zinv);
-      return new Point(ax, ay);
-    }
-    /**
-     * Negation operation. It returns the additive inverse of the Jacobian point.
-     *
-     * @method neg
-     * @returns Returns a new Jacobian point as the result of the negation.
-     *
-     * @example
-     * const jp = new JacobianPoint(x, y, z)
-     * const result = jp.neg()
-     */
-    neg() {
-      return new _JacobianPoint(this.x, this.y.redNeg(), this.z);
-    }
-    /**
-     * Addition operation in the Jacobian coordinates. It takes a Jacobian point as an argument
-     * and returns a new Jacobian point as a result of the addition. In the special cases,
-     * when either one of the points is the point at infinity, it will return the other point.
-     *
-     * @method add
-     * @param p - The Jacobian point to be added.
-     * @returns Returns a new Jacobian point as the result of the addition.
-     *
-     * @example
-     * const p1 = new JacobianPoint(x1, y1, z1)
-     * const p2 = new JacobianPoint(x2, y2, z2)
-     * const result = p1.add(p2)
-     */
-    add(p) {
-      if (this.isInfinity()) {
-        return p;
-      }
-      if (p.isInfinity()) {
-        return this;
-      }
-      const pz2 = p.z.redSqr();
-      const z2 = this.z.redSqr();
-      const u1 = this.x.redMul(pz2);
-      const u2 = p.x.redMul(z2);
-      const s1 = this.y.redMul(pz2.redMul(p.z));
-      const s2 = p.y.redMul(z2.redMul(this.z));
-      const h = u1.redSub(u2);
-      const r2 = s1.redSub(s2);
-      if (h.cmpn(0) === 0) {
-        if (r2.cmpn(0) !== 0) {
-          return new _JacobianPoint(null, null, null);
-        } else {
-          return this.dbl();
-        }
-      }
-      const h2 = h.redSqr();
-      const h3 = h2.redMul(h);
-      const v = u1.redMul(h2);
-      const nx = r2.redSqr().redIAdd(h3).redISub(v).redISub(v);
-      const ny = r2.redMul(v.redISub(nx)).redISub(s1.redMul(h3));
-      const nz = this.z.redMul(p.z).redMul(h);
-      return new _JacobianPoint(nx, ny, nz);
-    }
-    /**
-     * Mixed addition operation. This function combines the standard point addition with
-     * the transformation from the affine to Jacobian coordinates. It first converts
-     * the affine point to Jacobian, and then preforms the addition.
-     *
-     * @method mixedAdd
-     * @param p - The affine point to be added.
-     * @returns Returns the result of the mixed addition as a new Jacobian point.
-     *
-     * @example
-     * const jp = new JacobianPoint(x1, y1, z1)
-     * const ap = new Point(x2, y2)
-     * const result = jp.mixedAdd(ap)
-     */
-    mixedAdd(p) {
-      if (this.isInfinity()) {
-        return p.toJ();
-      }
-      if (p.isInfinity()) {
-        return this;
-      }
-      if (p.x === null || p.y === null) {
-        throw new Error("Point coordinates cannot be null");
-      }
-      const z2 = this.z.redSqr();
-      const u1 = this.x;
-      const u2 = p.x.redMul(z2);
-      const s1 = this.y;
-      const s2 = p.y.redMul(z2).redMul(this.z);
-      const h = u1.redSub(u2);
-      const r2 = s1.redSub(s2);
-      if (h.cmpn(0) === 0) {
-        if (r2.cmpn(0) !== 0) {
-          return new _JacobianPoint(null, null, null);
-        } else {
-          return this.dbl();
-        }
-      }
-      const h2 = h.redSqr();
-      const h3 = h2.redMul(h);
-      const v = u1.redMul(h2);
-      const nx = r2.redSqr().redIAdd(h3).redISub(v).redISub(v);
-      const ny = r2.redMul(v.redISub(nx)).redISub(s1.redMul(h3));
-      const nz = this.z.redMul(h);
-      return new _JacobianPoint(nx, ny, nz);
-    }
-    /**
-     * Multiple doubling operation. It doubles the Jacobian point as many times as the pow parameter specifies. If pow is 0 or the point is the point at infinity, it will return the point itself.
-     *
-     * @method dblp
-     * @param pow - The number of times the point should be doubled.
-     * @returns Returns a new Jacobian point as the result of multiple doublings.
-     *
-     * @example
-     * const jp = new JacobianPoint(x, y, z)
-     * const result = jp.dblp(3)
-     */
-    dblp(pow) {
-      if (pow === 0) {
-        return this;
-      }
-      if (this.isInfinity()) {
-        return this;
-      }
-      if (typeof pow === "undefined") {
-        return this.dbl();
-      }
-      let r2 = this;
-      for (let i = 0; i < pow; i++) {
-        r2 = r2.dbl();
-      }
-      return r2;
-    }
-    /**
-     * Point doubling operation in the Jacobian coordinates. A special case is when the point is the point at infinity, in this case, this function will return the point itself.
-     *
-     * @method dbl
-     * @returns Returns a new Jacobian point as the result of the doubling.
-     *
-     * @example
-     * const jp = new JacobianPoint(x, y, z)
-     * const result = jp.dbl()
-     */
-    dbl() {
-      if (this.isInfinity()) {
-        return this;
-      }
-      let nx;
-      let ny;
-      let nz;
-      if (this.zOne) {
-        const xx = this.x.redSqr();
-        const yy = this.y.redSqr();
-        const yyyy = yy.redSqr();
-        let s2 = this.x.redAdd(yy).redSqr().redISub(xx).redISub(yyyy);
-        s2 = s2.redIAdd(s2);
-        const m = xx.redAdd(xx).redIAdd(xx);
-        const t = m.redSqr().redISub(s2).redISub(s2);
-        let yyyy8 = yyyy.redIAdd(yyyy);
-        yyyy8 = yyyy8.redIAdd(yyyy8);
-        yyyy8 = yyyy8.redIAdd(yyyy8);
-        nx = t;
-        ny = m.redMul(s2.redISub(t)).redISub(yyyy8);
-        nz = this.y.redAdd(this.y);
-      } else {
-        const a = this.x.redSqr();
-        const b = this.y.redSqr();
-        const c = b.redSqr();
-        let d = this.x.redAdd(b).redSqr().redISub(a).redISub(c);
-        d = d.redIAdd(d);
-        const e = a.redAdd(a).redIAdd(a);
-        const f2 = e.redSqr();
-        let c8 = c.redIAdd(c);
-        c8 = c8.redIAdd(c8);
-        c8 = c8.redIAdd(c8);
-        nx = f2.redISub(d).redISub(d);
-        ny = e.redMul(d.redISub(nx)).redISub(c8);
-        nz = this.y.redMul(this.z);
-        nz = nz.redIAdd(nz);
-      }
-      return new _JacobianPoint(nx, ny, nz);
-    }
-    /**
-     * Equality check operation. It checks whether the affine or Jacobian point is equal to this Jacobian point.
-     *
-     * @method eq
-     * @param p - The affine or Jacobian point to compare with.
-     * @returns Returns true if the points are equal, otherwise returns false.
-     *
-     * @example
-     * const jp1 = new JacobianPoint(x1, y1, z1)
-     * const jp2 = new JacobianPoint(x2, y2, z2)
-     * const areEqual = jp1.eq(jp2)
-     */
-    eq(p) {
-      if (p.type === "affine") {
-        return this.eq(p.toJ());
-      }
-      if (this === p) {
-        return true;
-      }
-      p = p;
-      if (this.isInfinity() && p.isInfinity()) {
-        return true;
-      }
-      if (this.isInfinity() !== p.isInfinity()) {
-        return false;
-      }
-      const z2 = this.z.redSqr();
-      const pz2 = p.z.redSqr();
-      if (this.x.redMul(pz2).redISub(p.x.redMul(z2)).cmpn(0) !== 0) {
-        return false;
-      }
-      const z3 = z2.redMul(this.z);
-      const pz3 = pz2.redMul(p.z);
-      return this.y.redMul(pz3).redISub(p.y.redMul(z3)).cmpn(0) === 0;
-    }
-    /**
-     * Equality check operation in relation to an x coordinate of a point in projective coordinates.
-     * It checks whether the x coordinate of the Jacobian point is equal to the provided x coordinate
-     * of a point in projective coordinates.
-     *
-     * @method eqXToP
-     * @param x - The x coordinate of a point in projective coordinates.
-     * @returns Returns true if the x coordinates are equal, otherwise returns false.
-     *
-     * @example
-     * const jp = new JacobianPoint(x1, y1, z1)
-     * const isXEqual = jp.eqXToP(x2)
-     */
-    eqXToP(x) {
-      const zs = this.z.redSqr();
-      const rx = x.toRed(this.curve?.red).redMul(zs);
-      if (this.x.cmp(rx) === 0) {
-        return true;
-      }
-      const xc = x.clone();
-      if (this.curve === null || this.curve.redN == null) {
-        throw new Error("Curve or redN is not initialized.");
-      }
-      const t = this.curve.redN.redMul(zs);
-      while (xc.cmp(this.curve.p) < 0) {
-        xc.iadd(this.curve.n);
-        if (xc.cmp(this.curve.p) >= 0) {
-          return false;
-        }
-        rx.redIAdd(t);
-        if (this.x.cmp(rx) === 0) {
-          return true;
-        }
-      }
-      return false;
-    }
-    /**
-     * Returns the string representation of the JacobianPoint instance.
-     * @method inspect
-     * @returns Returns the string description of the JacobianPoint. If the JacobianPoint represents a point at infinity, the return value of this function is '<EC JPoint Infinity>'. For a normal point, it returns the string description format as '<EC JPoint x: x-coordinate y: y-coordinate z: z-coordinate>'.
-     *
-     * @example
-     * const point = new JacobianPoint('5', '6', '1');
-     * console.log(point.inspect()); // Output: '<EC JPoint x: 5 y: 6 z: 1>'
-     */
-    inspect() {
-      if (this.isInfinity()) {
-        return "<EC JPoint Infinity>";
-      }
-      return "<EC JPoint x: " + this.x.toString(16, 2) + " y: " + this.y.toString(16, 2) + " z: " + this.z.toString(16, 2) + ">";
-    }
-    /**
-     * Checks whether the JacobianPoint instance represents a point at infinity.
-     * @method isInfinity
-     * @returns Returns true if the JacobianPoint's z-coordinate equals to zero (which represents the point at infinity in Jacobian coordinates). Returns false otherwise.
-     *
-     * @example
-     * const point = new JacobianPoint('5', '6', '0');
-     * console.log(point.isInfinity()); // Output: true
-     */
-    isInfinity() {
-      return this.z.cmpn(0) === 0;
-    }
-  };
-
   // node_modules/@bsv/sdk/dist/esm/src/primitives/utils.js
   var utils_exports = {};
   __export(utils_exports, {
@@ -2796,12 +2441,14 @@
     encode: () => encode,
     fromBase58: () => fromBase58,
     fromBase58Check: () => fromBase58Check,
+    hexToUint8Array: () => hexToUint8Array,
     minimallyEncode: () => minimallyEncode,
     toArray: () => toArray2,
     toBase58: () => toBase58,
     toBase58Check: () => toBase58Check,
     toBase64: () => toBase64,
     toHex: () => toHex,
+    toSafeString: () => toSafeString,
     toUTF8: () => toUTF8,
     toUint8Array: () => toUint8Array,
     verifyNotNull: () => verifyNotNull,
@@ -2863,8 +2510,8 @@
     }
   };
   var BaseHash = class {
-    pending;
-    pendingTotal;
+    pending = null;
+    pendingTotal = 0;
     blockSize;
     outSize;
     endian;
@@ -2873,8 +2520,6 @@
     padLength;
     hmacStrength;
     constructor(blockSize, outSize, hmacStrength, padLength) {
-      this.pending = null;
-      this.pendingTotal = 0;
       this.blockSize = blockSize;
       this.outSize = outSize;
       this.hmacStrength = hmacStrength;
@@ -2883,7 +2528,7 @@
       this._delta8 = this.blockSize / 8;
       this._delta32 = this.blockSize / 32;
     }
-    _update(msg, start) {
+    _update(_msg, _start) {
       throw new Error("Not implemented");
     }
     _digest() {
@@ -2972,7 +2617,7 @@
       }
       const bytes2 = this._delta8;
       const k = bytes2 - (len + this.padLength) % bytes2;
-      const res = new Array(k + this.padLength);
+      const res = Array.from({ length: k + this.padLength });
       res[0] = 128;
       let i;
       for (i = 1; i < k; i++) {
@@ -2985,7 +2630,7 @@
         throw new Error("Message too long for this hash function");
       }
       if (this.endian === "big") {
-        const lenArray = new Array(lengthBytes);
+        const lenArray = Array.from({ length: lengthBytes });
         for (let b = lengthBytes - 1; b >= 0; b--) {
           lenArray[b] = Number(totalBits & 0xffn);
           totalBits >>= 8n;
@@ -3002,14 +2647,47 @@
       return res;
     }
   };
-  function isSurrogatePair(msg, i) {
-    if ((msg.charCodeAt(i) & 64512) !== 55296) {
-      return false;
+  function appendUtf8CodeUnit(msg, i, out) {
+    const c = msg.codePointAt(i);
+    if (c < 128) {
+      out.push(c);
+      return i;
     }
-    if (i < 0 || i + 1 >= msg.length) {
-      return false;
+    if (c < 2048) {
+      out.push(c >> 6 | 192, c & 63 | 128);
+      return i;
     }
-    return (msg.charCodeAt(i + 1) & 64512) === 56320;
+    if (c > 65535) {
+      out.push(c >> 18 | 240, c >> 12 & 63 | 128, c >> 6 & 63 | 128, c & 63 | 128);
+      return i + 1;
+    }
+    out.push(c >> 12 | 224, c >> 6 & 63 | 128, c & 63 | 128);
+    return i;
+  }
+  function utf8StringToArray(msg) {
+    const res = [];
+    let i = 0;
+    while (i < msg.length) {
+      const lastConsumed = appendUtf8CodeUnit(msg, i, res);
+      i = lastConsumed + 1;
+    }
+    return res;
+  }
+  function hexStringToArray(msg) {
+    assertValidHex(msg);
+    const normalized = normalizeHex(msg);
+    const res = [];
+    for (let i = 0; i < normalized.length; i += 2) {
+      res.push(Number.parseInt(normalized[i] + normalized[i + 1], 16));
+    }
+    return res;
+  }
+  function numberArrayToByteArray(msg) {
+    const res = [];
+    for (let i = 0; i < msg.length; i++) {
+      res[i] = Math.trunc(msg[i]);
+    }
+    return res;
   }
   function toArray(msg, enc) {
     if (Array.isArray(msg)) {
@@ -3018,51 +2696,17 @@
     if (!msg) {
       return [];
     }
-    const res = [];
     if (typeof msg === "string") {
-      if (enc !== "hex") {
-        let p = 0;
-        for (let i = 0; i < msg.length; i++) {
-          let c = msg.charCodeAt(i);
-          if (c < 128) {
-            res[p++] = c;
-          } else if (c < 2048) {
-            res[p++] = c >> 6 | 192;
-            res[p++] = c & 63 | 128;
-          } else if (isSurrogatePair(msg, i)) {
-            c = 65536 + ((c & 1023) << 10) + (msg.charCodeAt(++i) & 1023);
-            res[p++] = c >> 18 | 240;
-            res[p++] = c >> 12 & 63 | 128;
-            res[p++] = c >> 6 & 63 | 128;
-            res[p++] = c & 63 | 128;
-          } else {
-            res[p++] = c >> 12 | 224;
-            res[p++] = c >> 6 & 63 | 128;
-            res[p++] = c & 63 | 128;
-          }
-        }
-      } else {
-        assertValidHex(msg);
-        msg = normalizeHex(msg);
-        for (let i = 0; i < msg.length; i += 2) {
-          res.push(parseInt(msg[i] + msg[i + 1], 16));
-        }
-      }
-    } else {
-      msg = msg;
-      for (let i = 0; i < msg.length; i++) {
-        res[i] = msg[i] | 0;
-      }
+      return enc === "hex" ? hexStringToArray(msg) : utf8StringToArray(msg);
     }
-    return res;
+    return numberArrayToByteArray(msg);
   }
   function htonl(w) {
     return swapBytes32(w);
   }
   function toHex32(msg, endian) {
     let res = "";
-    for (let i = 0; i < msg.length; i++) {
-      let w = msg[i];
+    for (let w of msg) {
       if (endian === "little") {
         w = htonl(w);
       }
@@ -3089,16 +2733,106 @@
       return word;
     }
   }
+  var BufferCtor2 = typeof globalThis === "undefined" ? void 0 : globalThis.Buffer;
+  var CAN_USE_BUFFER2 = BufferCtor2 != null && typeof BufferCtor2.from === "function";
+  var HEX_DIGITS = "0123456789abcdef";
+  var HEX_BYTE_STRINGS = Array.from({ length: 256 });
+  for (let i = 0; i < HEX_BYTE_STRINGS.length; i++) {
+    HEX_BYTE_STRINGS[i] = HEX_DIGITS[i >> 4 & 15] + HEX_DIGITS[i & 15];
+  }
   function bytesToHex(data) {
-    let res = "";
-    for (const b of data)
-      res += b.toString(16).padStart(2, "0");
-    return res;
+    if (CAN_USE_BUFFER2) {
+      return BufferCtor2.from(data).toString("hex");
+    }
+    const out = Array.from({ length: data.length });
+    for (let i = 0; i < data.length; i++)
+      out[i] = HEX_BYTE_STRINGS[data[i]];
+    return out.join("");
+  }
+  var NODE_CRYPTO = (() => {
+    const processLike = typeof globalThis === "undefined" ? void 0 : globalThis.process;
+    const getBuiltinModule = processLike?.getBuiltinModule;
+    if (typeof getBuiltinModule === "function") {
+      try {
+        const crypto = getBuiltinModule.call(processLike, "node:crypto");
+        if (crypto != null)
+          return crypto;
+      } catch {
+      }
+    }
+    return void 0;
+  })();
+  function toHashBytes(msg, enc) {
+    if (msg instanceof Uint8Array) {
+      return msg;
+    }
+    if (Array.isArray(msg)) {
+      return new Uint8Array(msg);
+    }
+    return Uint8Array.from(toArray(msg, enc));
+  }
+  function toHashKeyBytes(key) {
+    return typeof key === "string" ? toHashBytes(key, "hex") : toHashBytes(key);
+  }
+  function updateNativeOrFallback(native, fallback, data) {
+    if (native != null) {
+      native.update(data);
+    } else if (fallback != null) {
+      fallback.update(data);
+    }
+  }
+  function digestNativeOrFallback(native, fallback) {
+    if (native != null)
+      return Array.from(native.digest());
+    if (fallback != null)
+      return Array.from(fallback.digest());
+    return [];
+  }
+  function digestHexNativeOrFallback(native, fallback) {
+    if (native != null)
+      return native.digest("hex");
+    if (fallback != null)
+      return bytesToHex(fallback.digest());
+    return "";
+  }
+  function createNodeHash(algorithm) {
+    const createHash = NODE_CRYPTO?.createHash;
+    if (typeof createHash !== "function")
+      return void 0;
+    try {
+      return createHash(algorithm);
+    } catch {
+      return void 0;
+    }
+  }
+  function createNodeHmac(algorithm, keyBytes) {
+    const createHmac = NODE_CRYPTO?.createHmac;
+    if (typeof createHmac !== "function")
+      return void 0;
+    try {
+      return createHmac(algorithm, keyBytes);
+    } catch {
+      return void 0;
+    }
+  }
+  function digestWithNodeHash(algorithm, msg, enc) {
+    const hash = createNodeHash(algorithm);
+    if (hash == null)
+      return void 0;
+    hash.update(toHashBytes(msg, enc));
+    return hash.digest();
+  }
+  function digestWithNodeHmac(algorithm, key, msg, enc) {
+    const hmac2 = createNodeHmac(algorithm, toHashKeyBytes(key));
+    if (hmac2 == null)
+      return void 0;
+    hmac2.update(toHashBytes(msg, enc));
+    return hmac2.digest();
   }
   function join32(msg, start, end, endian) {
     const len = end - start;
     assert(len % 4 === 0);
-    const res = new Array(len / 4);
+    const res = Array.from({ length: len / 4 });
     for (let i = 0, k = start; i < res.length; i++, k += 4) {
       let w;
       if (endian === "big") {
@@ -3111,7 +2845,7 @@
     return res;
   }
   function split32(msg, endian) {
-    const res = new Array(msg.length * 4);
+    const res = Array.from({ length: msg.length * 4 });
     for (let i = 0, k = 0; i < msg.length; i++, k += 4) {
       const m = msg[i];
       if (endian === "big") {
@@ -3555,24 +3289,24 @@
       this.endian = "little";
     }
     _update(msg, start) {
-      let A2 = this.h[0];
-      let B2 = this.h[1];
+      let A = this.h[0];
+      let B = this.h[1];
       let C = this.h[2];
       let D = this.h[3];
       let E = this.h[4];
-      let Ah = A2;
-      let Bh = B2;
+      let Ah = A;
+      let Bh = B;
       let Ch = C;
       let Dh = D;
       let Eh = E;
       let T;
       for (let j = 0; j < 80; j++) {
-        T = sum32(rotl32(SUM32_4(A2, f(j, B2, C, D), msg[r[j] + start], K(j)), s[j]), E);
-        A2 = E;
+        T = sum32(rotl32(SUM32_4(A, f(j, B, C, D), msg[r[j] + start], K(j)), s[j]), E);
+        A = E;
         E = D;
         D = rotl32(C, 10);
-        C = B2;
-        B2 = T;
+        C = B;
+        B = T;
         T = sum32(rotl32(SUM32_4(Ah, f(79 - j, Bh, Ch, Dh), msg[rh[j] + start], Kh(j)), sh[j]), Eh);
         Ah = Eh;
         Eh = Dh;
@@ -3583,8 +3317,8 @@
       T = SUM32_3(this.h[1], C, Dh);
       this.h[1] = SUM32_3(this.h[2], D, Eh);
       this.h[2] = SUM32_3(this.h[3], E, Ah);
-      this.h[3] = SUM32_3(this.h[4], A2, Bh);
-      this.h[4] = SUM32_3(this.h[0], B2, Ch);
+      this.h[3] = SUM32_3(this.h[4], A, Bh);
+      this.h[4] = SUM32_3(this.h[0], B, Ch);
       this.h[0] = T;
     }
     _digest() {
@@ -3596,19 +3330,22 @@
   };
   var SHA256 = class {
     h;
+    native;
     constructor() {
-      this.h = new FastSHA256();
+      this.native = createNodeHash("sha256");
+      if (this.native == null) {
+        this.h = new FastSHA256();
+      }
     }
     update(msg, enc) {
-      const data = msg instanceof Uint8Array ? msg : Uint8Array.from(toArray(msg, enc));
-      this.h.update(data);
+      updateNativeOrFallback(this.native, this.h, toHashBytes(msg, enc));
       return this;
     }
     digest() {
-      return Array.from(this.h.digest());
+      return digestNativeOrFallback(this.native, this.h);
     }
     digestHex() {
-      return bytesToHex(this.h.digest());
+      return digestHexNativeOrFallback(this.native, this.h);
     }
   };
   var SHA1 = class extends BaseHash {
@@ -3619,13 +3356,11 @@
       super(512, 160, 80, 64);
       this.k = [1518500249, 1859775393, 2400959708, 3395469782];
       this.h = [1732584193, 4023233417, 2562383102, 271733878, 3285377520];
-      this.W = new Array(80);
+      this.W = Array.from({ length: 80 });
     }
     _update(msg, start) {
       const W = this.W;
-      if (start === void 0) {
-        start = 0;
-      }
+      start ??= 0;
       let i;
       for (i = 0; i < 16; i++) {
         W[i] = msg[start + i];
@@ -3639,7 +3374,7 @@
       let d = this.h[3];
       let e = this.h[4];
       for (i = 0; i < W.length; i++) {
-        const s2 = ~~(i / 20);
+        const s2 = Math.trunc(i / 20);
         const t = SUM32_5(rotl32(a, 5), FT_1(s2, b, c, d), e, W[i], this.k[s2]);
         e = d;
         d = c;
@@ -3662,23 +3397,27 @@
   };
   var SHA512 = class {
     h;
+    native;
     constructor() {
-      this.h = new FastSHA512();
+      this.native = createNodeHash("sha512");
+      if (this.native == null) {
+        this.h = new FastSHA512();
+      }
     }
     update(msg, enc) {
-      const data = Uint8Array.from(toArray(msg, enc));
-      this.h.update(data);
+      updateNativeOrFallback(this.native, this.h, toHashBytes(msg, enc));
       return this;
     }
     digest() {
-      return Array.from(this.h.digest());
+      return digestNativeOrFallback(this.native, this.h);
     }
     digestHex() {
-      return bytesToHex(this.h.digest());
+      return digestHexNativeOrFallback(this.native, this.h);
     }
   };
   var SHA256HMAC = class {
     h;
+    native;
     blockSize = 64;
     outSize = 32;
     /**
@@ -3695,8 +3434,11 @@
      * const myHMAC = new SHA256HMAC('deadbeef');
      */
     constructor(key) {
-      const k = key instanceof Uint8Array ? key : Uint8Array.from(toArray(key, typeof key === "string" ? "hex" : void 0));
-      this.h = new HMAC(sha256Fast, k);
+      const k = toHashKeyBytes(key);
+      this.native = createNodeHmac("sha256", k);
+      if (this.native == null) {
+        this.h = new HMAC(sha256Fast, k);
+      }
     }
     /**
      * Updates the `SHA256HMAC` object with part of the message to be hashed.
@@ -3710,8 +3452,7 @@
      * myHMAC.update('deadbeef', 'hex');
      */
     update(msg, enc) {
-      const data = msg instanceof Uint8Array ? msg : Uint8Array.from(toArray(msg, enc));
-      this.h.update(data);
+      updateNativeOrFallback(this.native, this.h, toHashBytes(msg, enc));
       return this;
     }
     /**
@@ -3724,7 +3465,7 @@
      * let hashedMessage = myHMAC.digest();
      */
     digest() {
-      return Array.from(this.h.digest());
+      return digestNativeOrFallback(this.native, this.h);
     }
     /**
      * Finalizes the HMAC computation and returns the resultant hash as a hex string.
@@ -3736,7 +3477,7 @@
      * let hashedMessage = myHMAC.digestHex();
      */
     digestHex() {
-      return bytesToHex(this.h.digest());
+      return digestHexNativeOrFallback(this.native, this.h);
     }
   };
   var SHA1HMAC = class {
@@ -3776,6 +3517,7 @@
   };
   var SHA512HMAC = class {
     h;
+    native;
     blockSize = 128;
     outSize = 32;
     /**
@@ -3792,8 +3534,11 @@
      * const myHMAC = new SHA512HMAC('deadbeef');
      */
     constructor(key) {
-      const k = key instanceof Uint8Array ? key : Uint8Array.from(toArray(key, typeof key === "string" ? "hex" : void 0));
-      this.h = new HMAC(sha512Fast, k);
+      const k = toHashKeyBytes(key);
+      this.native = createNodeHmac("sha512", k);
+      if (this.native == null) {
+        this.h = new HMAC(sha512Fast, k);
+      }
     }
     /**
      * Updates the `SHA512HMAC` object with part of the message to be hashed.
@@ -3807,8 +3552,7 @@
      * myHMAC.update('deadbeef', 'hex');
      */
     update(msg, enc) {
-      const data = msg instanceof Uint8Array ? msg : Uint8Array.from(toArray(msg, enc));
-      this.h.update(data);
+      updateNativeOrFallback(this.native, this.h, toHashBytes(msg, enc));
       return this;
     }
     /**
@@ -3821,7 +3565,7 @@
      * let hashedMessage = myHMAC.digest();
      */
     digest() {
-      return Array.from(this.h.digest());
+      return digestNativeOrFallback(this.native, this.h);
     }
     /**
      * Finalizes the HMAC computation and returns the resultant hash as a hex string.
@@ -3833,33 +3577,59 @@
      * let hashedMessage = myHMAC.digestHex();
      */
     digestHex() {
-      return bytesToHex(this.h.digest());
+      return digestHexNativeOrFallback(this.native, this.h);
     }
   };
+  function sha256Bytes(msg, enc) {
+    const native = digestWithNodeHash("sha256", msg, enc);
+    if (native != null)
+      return native;
+    return new FastSHA256().update(toHashBytes(msg, enc)).digest();
+  }
+  function sha512Bytes(msg, enc) {
+    const native = digestWithNodeHash("sha512", msg, enc);
+    if (native != null)
+      return native;
+    return new FastSHA512().update(toHashBytes(msg, enc)).digest();
+  }
+  function ripemd160Bytes(msg, enc) {
+    return digestWithNodeHash("ripemd160", msg, enc);
+  }
   var ripemd160 = (msg, enc) => {
+    const native = ripemd160Bytes(msg, enc);
+    if (native != null)
+      return Array.from(native);
     return new RIPEMD160().update(msg, enc).digest();
   };
   var sha1 = (msg, enc) => {
     return new SHA1().update(msg, enc).digest();
   };
   var sha256 = (msg, enc) => {
-    return new SHA256().update(msg, enc).digest();
+    return Array.from(sha256Bytes(msg, enc));
   };
   var sha512 = (msg, enc) => {
-    return new SHA512().update(msg, enc).digest();
+    return Array.from(sha512Bytes(msg, enc));
   };
   var hash256 = (msg, enc) => {
-    const first = new SHA256().update(msg, enc).digest();
-    return new SHA256().update(first).digest();
+    return Array.from(sha256Bytes(sha256Bytes(msg, enc)));
   };
   var hash160 = (msg, enc) => {
-    const first = new SHA256().update(msg, enc).digest();
+    const first = sha256Bytes(msg, enc);
+    const native = ripemd160Bytes(first);
+    if (native != null)
+      return Array.from(native);
     return new RIPEMD160().update(first).digest();
   };
   var sha256hmac = (key, msg, enc) => {
+    const native = digestWithNodeHmac("sha256", key, msg, enc);
+    if (native != null)
+      return Array.from(native);
     return new SHA256HMAC(key).update(msg, enc).digest();
   };
   var sha512hmac = (key, msg, enc) => {
+    const native = digestWithNodeHmac("sha512", key, msg, enc);
+    if (native != null)
+      return Array.from(native);
     return new SHA512HMAC(key).update(msg, enc).digest();
   };
   function isBytes(a) {
@@ -3880,7 +3650,7 @@
   }
   function ahash(h) {
     if (typeof h !== "function" || typeof h.create !== "function") {
-      throw new Error("Hash should be wrapped by utils.createHasher");
+      throw new TypeError("Hash should be wrapped by utils.createHasher");
     }
     anumber(h.outputLen);
     anumber(h.blockLen);
@@ -3900,8 +3670,8 @@
     }
   }
   function clean(...arrays) {
-    for (let i = 0; i < arrays.length; i++)
-      arrays[i].fill(0);
+    for (const arr of arrays)
+      arr.fill(0);
   }
   function createView(arr) {
     return new DataView(arr.buffer, arr.byteOffset, arr.byteLength);
@@ -3917,12 +3687,7 @@
       throw new Error("string expected");
     return new Uint8Array(new TextEncoder().encode(str));
   }
-  function kdfInputToBytes(data) {
-    if (typeof data === "string")
-      data = utf8ToBytes(data);
-    abytes(data);
-    return data;
-  }
+  var kdfInputToBytes = toBytes;
   var Hash = class {
   };
   function createHasher(hashCons) {
@@ -3962,9 +3727,9 @@
     return { h: Ah + Bh + (l / 2 ** 32 | 0) | 0, l: l | 0 };
   }
   var add3L = (Al, Bl, Cl) => (Al >>> 0) + (Bl >>> 0) + (Cl >>> 0);
-  var add3H = (low, Ah, Bh, Ch) => Ah + Bh + Ch + (low / 2 ** 32 | 0) | 0;
+  var add3H = (low, Ah, Bh, Ch) => Math.trunc(Ah + Bh + Ch + Math.trunc(low / 2 ** 32));
   var add4L = (Al, Bl, Cl, Dl) => (Al >>> 0) + (Bl >>> 0) + (Cl >>> 0) + (Dl >>> 0);
-  var add4H = (low, Ah, Bh, Ch, Dh) => Ah + Bh + Ch + Dh + (low / 2 ** 32 | 0) | 0;
+  var add4H = (low, Ah, Bh, Ch, Dh) => Math.trunc(Ah + Bh + Ch + Dh + Math.trunc(low / 2 ** 32));
   var add5L = (Al, Bl, Cl, Dl, El) => (Al >>> 0) + (Bl >>> 0) + (Cl >>> 0) + (Dl >>> 0) + (El >>> 0);
   var add5H = (low, Ah, Bh, Ch, Dh, Eh) => Ah + Bh + Ch + Dh + Eh + (low / 2 ** 32 | 0) | 0;
   var HashMD = class extends Hash {
@@ -4048,7 +3813,7 @@
       return res;
     }
     _cloneInto(to) {
-      to ||= new this.constructor();
+      to ??= new this.constructor();
       to.set(...this.get());
       const { blockLen, buffer, length, finished, destroyed, pos } = this;
       to.destroyed = destroyed;
@@ -4153,24 +3918,32 @@
   ]);
   var SHA256_W = new Uint32Array(64);
   var FastSHA256 = class extends HashMD {
+    // eslint-disable-next-line no-bitwise -- ToInt32 (ECMA-262); not truncation. Required for SHA arithmetic.
     A = SHA256_IV[0] | 0;
+    // eslint-disable-next-line no-bitwise -- ToInt32 (ECMA-262); not truncation. Required for SHA arithmetic.
     B = SHA256_IV[1] | 0;
+    // eslint-disable-next-line no-bitwise -- ToInt32 (ECMA-262); not truncation. Required for SHA arithmetic.
     C = SHA256_IV[2] | 0;
+    // eslint-disable-next-line no-bitwise -- ToInt32 (ECMA-262); not truncation. Required for SHA arithmetic.
     D = SHA256_IV[3] | 0;
+    // eslint-disable-next-line no-bitwise -- ToInt32 (ECMA-262); not truncation. Required for SHA arithmetic.
     E = SHA256_IV[4] | 0;
+    // eslint-disable-next-line no-bitwise -- ToInt32 (ECMA-262); not truncation. Required for SHA arithmetic.
     F = SHA256_IV[5] | 0;
+    // eslint-disable-next-line no-bitwise -- ToInt32 (ECMA-262); not truncation. Required for SHA arithmetic.
     G = SHA256_IV[6] | 0;
+    // eslint-disable-next-line no-bitwise -- ToInt32 (ECMA-262); not truncation. Required for SHA arithmetic.
     H = SHA256_IV[7] | 0;
     constructor(outputLen = 32) {
       super(64, outputLen, 8, false);
     }
     get() {
-      const { A: A2, B: B2, C, D, E, F, G, H } = this;
-      return [A2, B2, C, D, E, F, G, H];
+      const { A, B, C, D, E, F, G, H } = this;
+      return [A, B, C, D, E, F, G, H];
     }
-    set(A2, B2, C, D, E, F, G, H) {
-      this.A = A2 | 0;
-      this.B = B2 | 0;
+    set(...[A, B, C, D, E, F, G, H]) {
+      this.A = A | 0;
+      this.B = B | 0;
       this.C = C | 0;
       this.D = D | 0;
       this.E = E | 0;
@@ -4189,21 +3962,21 @@
         const s1 = G1_256(w2);
         SHA256_W[i] = sum32(sum32(s0, SHA256_W[i - 7]), sum32(s1, SHA256_W[i - 16]));
       }
-      let { A: A2, B: B2, C, D, E, F, G, H } = this;
+      let { A, B, C, D, E, F, G, H } = this;
       for (let i = 0; i < 64; i++) {
         const T1 = SUM32_5(H, S1_256(E), ch32(E, F, G), K2562[i], SHA256_W[i]);
-        const T2 = sum32(S0_256(A2), maj32(A2, B2, C));
+        const T2 = sum32(S0_256(A), maj32(A, B, C));
         H = G;
         G = F;
         F = E;
         E = sum32(D, T1);
         D = C;
-        C = B2;
-        B2 = A2;
-        A2 = sum32(T1, T2);
+        C = B;
+        B = A;
+        A = sum32(T1, T2);
       }
-      this.A = sum32(this.A, A2);
-      this.B = sum32(this.B, B2);
+      this.A = sum32(this.A, A);
+      this.B = sum32(this.B, B);
       this.C = sum32(this.C, C);
       this.D = sum32(this.D, D);
       this.E = sum32(this.E, E);
@@ -4319,27 +4092,43 @@
     "0x597f299cfc657e2a",
     "0x5fcb6fab3ad6faec",
     "0x6c44198c4a475817"
-  ].map((n) => BigInt(n))))();
+  ].map(BigInt)))();
   var SHA512_Kh = (() => K512[0])();
   var SHA512_Kl = (() => K512[1])();
   var SHA512_W_H = new Uint32Array(80);
   var SHA512_W_L = new Uint32Array(80);
   var FastSHA512 = class extends HashMD {
+    // eslint-disable-next-line no-bitwise -- ToInt32 (ECMA-262); not truncation. Required for SHA arithmetic.
     Ah = SHA512_IV[0] | 0;
+    // eslint-disable-next-line no-bitwise -- ToInt32 (ECMA-262); not truncation. Required for SHA arithmetic.
     Al = SHA512_IV[1] | 0;
+    // eslint-disable-next-line no-bitwise -- ToInt32 (ECMA-262); not truncation. Required for SHA arithmetic.
     Bh = SHA512_IV[2] | 0;
+    // eslint-disable-next-line no-bitwise -- ToInt32 (ECMA-262); not truncation. Required for SHA arithmetic.
     Bl = SHA512_IV[3] | 0;
+    // eslint-disable-next-line no-bitwise -- ToInt32 (ECMA-262); not truncation. Required for SHA arithmetic.
     Ch = SHA512_IV[4] | 0;
+    // eslint-disable-next-line no-bitwise -- ToInt32 (ECMA-262); not truncation. Required for SHA arithmetic.
     Cl = SHA512_IV[5] | 0;
+    // eslint-disable-next-line no-bitwise -- ToInt32 (ECMA-262); not truncation. Required for SHA arithmetic.
     Dh = SHA512_IV[6] | 0;
+    // eslint-disable-next-line no-bitwise -- ToInt32 (ECMA-262); not truncation. Required for SHA arithmetic.
     Dl = SHA512_IV[7] | 0;
+    // eslint-disable-next-line no-bitwise -- ToInt32 (ECMA-262); not truncation. Required for SHA arithmetic.
     Eh = SHA512_IV[8] | 0;
+    // eslint-disable-next-line no-bitwise -- ToInt32 (ECMA-262); not truncation. Required for SHA arithmetic.
     El = SHA512_IV[9] | 0;
+    // eslint-disable-next-line no-bitwise -- ToInt32 (ECMA-262); not truncation. Required for SHA arithmetic.
     Fh = SHA512_IV[10] | 0;
+    // eslint-disable-next-line no-bitwise -- ToInt32 (ECMA-262); not truncation. Required for SHA arithmetic.
     Fl = SHA512_IV[11] | 0;
+    // eslint-disable-next-line no-bitwise -- ToInt32 (ECMA-262); not truncation. Required for SHA arithmetic.
     Gh = SHA512_IV[12] | 0;
+    // eslint-disable-next-line no-bitwise -- ToInt32 (ECMA-262); not truncation. Required for SHA arithmetic.
     Gl = SHA512_IV[13] | 0;
+    // eslint-disable-next-line no-bitwise -- ToInt32 (ECMA-262); not truncation. Required for SHA arithmetic.
     Hh = SHA512_IV[14] | 0;
+    // eslint-disable-next-line no-bitwise -- ToInt32 (ECMA-262); not truncation. Required for SHA arithmetic.
     Hl = SHA512_IV[15] | 0;
     constructor(outputLen = 64) {
       super(128, outputLen, 16, false);
@@ -4348,7 +4137,7 @@
       const { Ah, Al, Bh, Bl, Ch, Cl, Dh, Dl, Eh, El, Fh, Fl, Gh, Gl, Hh, Hl } = this;
       return [Ah, Al, Bh, Bl, Ch, Cl, Dh, Dl, Eh, El, Fh, Fl, Gh, Gl, Hh, Hl];
     }
-    set(Ah, Al, Bh, Bl, Ch, Cl, Dh, Dl, Eh, El, Fh, Fl, Gh, Gl, Hh, Hl) {
+    set(...[Ah, Al, Bh, Bl, Ch, Cl, Dh, Dl, Eh, El, Fh, Fl, Gh, Gl, Hh, Hl]) {
       this.Ah = Ah | 0;
       this.Al = Al | 0;
       this.Bh = Bh | 0;
@@ -4367,9 +4156,9 @@
       this.Hl = Hl | 0;
     }
     process(view, offset) {
-      for (let i = 0; i < 16; i++, offset += 4) {
+      for (let i = 0; i < 16; i++, offset += 8) {
         SHA512_W_H[i] = view.getUint32(offset);
-        SHA512_W_L[i] = view.getUint32(offset += 4);
+        SHA512_W_L[i] = view.getUint32(offset + 4);
       }
       for (let i = 16; i < 80; i++) {
         const W15h = SHA512_W_H[i - 15] | 0;
@@ -4448,7 +4237,7 @@
       const key = toBytes(_key);
       this.iHash = hash.create();
       if (typeof this.iHash.update !== "function") {
-        throw new Error("Expected instance of class which extends utils.Hash");
+        throw new TypeError("Expected instance of class which extends utils.Hash");
       }
       this.blockLen = this.iHash.blockLen;
       this.outputLen = this.iHash.outputLen;
@@ -4484,7 +4273,7 @@
       return out;
     }
     _cloneInto(to) {
-      to ||= Object.create(Object.getPrototypeOf(this), {});
+      to ??= Object.create(Object.getPrototypeOf(this), {});
       const { oHash, iHash, finished, destroyed, blockLen, outputLen } = this;
       to = to;
       to.finished = finished;
@@ -4506,7 +4295,7 @@
   };
   function pbkdf2Core(hash, password, salt, opts) {
     ahash(hash);
-    const { c, dkLen } = Object.assign({ dkLen: 32 }, opts);
+    const { c, dkLen = 32 } = { ...opts };
     anumber(c);
     anumber(dkLen);
     if (c < 1)
@@ -4523,7 +4312,8 @@
     for (let ti = 1, pos = 0; pos < dkLen; ti++, pos += PRF.outputLen) {
       const Ti = DK.subarray(pos, pos + PRF.outputLen);
       view.setInt32(0, ti, false);
-      (prfW = PRFSalt._cloneInto(prfW)).update(arr).digestInto(u);
+      prfW = PRFSalt._cloneInto(prfW);
+      prfW.update(arr).digestInto(u);
       Ti.set(u.subarray(0, Ti.length));
       for (let ui = 1; ui < c; ui++) {
         PRF._cloneInto(prfW).update(u).digestInto(u);
@@ -4547,14 +4337,10 @@
     if (digest !== "sha512") {
       throw new Error("Only sha512 is supported in this PBKDF2 implementation");
     }
-    try {
-      const nodeCrypto = __require("crypto");
-      if (typeof nodeCrypto.pbkdf2Sync === "function") {
-        const p2 = Buffer.from(password);
-        const s3 = Buffer.from(salt);
-        return [...nodeCrypto.pbkdf2Sync(p2, s3, iterations, keylen, digest)];
-      }
-    } catch {
+    const pbkdf2Sync = NODE_CRYPTO?.pbkdf2Sync;
+    if (typeof pbkdf2Sync === "function") {
+      const out2 = pbkdf2Sync(toHashBytes(password), toHashBytes(salt), iterations, keylen, digest);
+      return Array.from(out2);
     }
     const p = Uint8Array.from(password);
     const s2 = Uint8Array.from(salt);
@@ -4618,6 +4404,13 @@
      */
     toUint8ArrayZeroCopy() {
       return this.buffer.subarray(0, this.pos);
+    }
+    /** Ensures room for `additionalBytes` without changing the written length. */
+    reserve(additionalBytes) {
+      if (!Number.isSafeInteger(additionalBytes) || additionalBytes < 0) {
+        throw new RangeError("WriterUint8Array reserve requires a non-negative safe integer");
+      }
+      this.ensureCapacity(additionalBytes);
     }
     ensureCapacity(needed) {
       if (this.pos + needed > this.capacity) {
@@ -4758,7 +4551,7 @@
       } else if (Array.isArray(bin)) {
         this.bin = new Uint8Array(bin);
       } else {
-        throw new Error("ReaderUint8Array constructor: bin must be Uint8Array or number[]");
+        throw new TypeError("ReaderUint8Array constructor: bin must be Uint8Array or number[]");
       }
       this.pos = pos;
       this.length = this.bin.length;
@@ -4771,6 +4564,29 @@
       const end = this.pos + len;
       this.pos = end;
       return this.bin.slice(start, end);
+    }
+    /**
+     * Reads a zero-copy view over the backing buffer. The view is valid for the
+     * lifetime of the backing `Uint8Array`; callers that require isolation should
+     * continue to use {@link read}.
+     */
+    readView(len = this.length - this.pos) {
+      if (!Number.isSafeInteger(len) || len < 0 || this.pos + len > this.length) {
+        throw new RangeError("ReaderUint8Array read exceeds available data");
+      }
+      const start = this.pos;
+      this.pos += len;
+      return this.bin.subarray(start, this.pos);
+    }
+    /** Advances without allocating. */
+    skip(len) {
+      if (!Number.isSafeInteger(len) || len < 0 || this.pos + len > this.length) {
+        throw new RangeError("ReaderUint8Array skip exceeds available data");
+      }
+      this.pos += len;
+    }
+    remaining() {
+      return this.length - this.pos;
     }
     readReverse(len = this.length) {
       const buf2 = new Uint8Array(len);
@@ -4788,7 +4604,7 @@
     readInt8() {
       const val = this.bin[this.pos];
       this.pos += 1;
-      return (val & 128) !== 0 ? val - 256 : val;
+      return (val & 128) === 0 ? val : val - 256;
     }
     readUInt16BE() {
       const val = this.bin[this.pos] << 8 | this.bin[this.pos + 1];
@@ -4797,7 +4613,7 @@
     }
     readInt16BE() {
       const val = this.readUInt16BE();
-      return (val & 32768) !== 0 ? val - 65536 : val;
+      return (val & 32768) === 0 ? val : val - 65536;
     }
     readUInt16LE() {
       const val = this.bin[this.pos] | this.bin[this.pos + 1] << 8;
@@ -4806,7 +4622,7 @@
     }
     readInt16LE() {
       const val = this.readUInt16LE();
-      const x = (val & 32768) !== 0 ? val - 65536 : val;
+      const x = (val & 32768) === 0 ? val : val - 65536;
       return x;
     }
     readUInt32BE() {
@@ -4819,7 +4635,7 @@
     }
     readInt32BE() {
       const val = this.readUInt32BE();
-      return (val & 2147483648) !== 0 ? val - 4294967296 : val;
+      return (val & 2147483648) === 0 ? val : val - 4294967296;
     }
     readUInt32LE() {
       const val = (this.bin[this.pos] | this.bin[this.pos + 1] << 8 | this.bin[this.pos + 2] << 16 | this.bin[this.pos + 3] << 24) >>> 0;
@@ -4828,7 +4644,7 @@
     }
     readInt32LE() {
       const val = this.readUInt32LE();
-      return (val & 2147483648) !== 0 ? val - 4294967296 : val;
+      return (val & 2147483648) === 0 ? val : val - 4294967296;
     }
     readUInt64BEBn() {
       const bin = Array.from(this.bin.slice(this.pos, this.pos + 8));
@@ -4899,8 +4715,32 @@
   };
 
   // node_modules/@bsv/sdk/dist/esm/src/primitives/utils.js
-  var BufferCtor2 = typeof globalThis !== "undefined" ? globalThis.Buffer : void 0;
-  var CAN_USE_BUFFER2 = BufferCtor2 != null && typeof BufferCtor2.from === "function";
+  var BufferCtor3 = globalThis.Buffer;
+  var CAN_USE_BUFFER3 = BufferCtor3 != null && typeof BufferCtor3.from === "function";
+  var toSafeString = (value, fallback = "Unknown value") => {
+    if (value === null)
+      return "null";
+    if (value === void 0)
+      return "undefined";
+    if (typeof value === "string")
+      return value;
+    if (typeof value === "number" || typeof value === "bigint")
+      return value.toString();
+    if (typeof value === "boolean")
+      return value ? "true" : "false";
+    if (typeof value === "symbol")
+      return value.description ?? value.toString();
+    if (value instanceof Error && value.message.length > 0)
+      return value.message;
+    const message = value.message;
+    if (typeof message === "string" && message.length > 0)
+      return message;
+    try {
+      return JSON.stringify(value) ?? fallback;
+    } catch {
+      return fallback;
+    }
+  };
   var zero2 = (word) => {
     if (word.length % 2 === 1) {
       return "0" + word;
@@ -4908,26 +4748,24 @@
       return word;
     }
   };
-  var HEX_DIGITS = "0123456789abcdef";
-  var HEX_BYTE_STRINGS = new Array(256);
+  var HEX_DIGITS2 = "0123456789abcdef";
+  var HEX_BYTE_STRINGS2 = Array.from({ length: 256 }, () => "");
   for (let i = 0; i < 256; i++) {
-    HEX_BYTE_STRINGS[i] = HEX_DIGITS[i >> 4 & 15] + HEX_DIGITS[i & 15];
+    HEX_BYTE_STRINGS2[i] = HEX_DIGITS2[i >> 4 & 15] + HEX_DIGITS2[i & 15];
   }
   var toHex = (msg) => {
-    if (CAN_USE_BUFFER2) {
-      return BufferCtor2.from(msg).toString("hex");
+    if (CAN_USE_BUFFER3) {
+      return BufferCtor3.from(msg).toString("hex");
     }
     if (msg.length === 0)
       return "";
-    const out = new Array(msg.length);
-    for (let i = 0; i < msg.length; i++) {
-      out[i] = HEX_BYTE_STRINGS[msg[i] & 255];
-    }
-    return out.join("");
+    return Array.from(msg, (byte) => HEX_BYTE_STRINGS2[byte & 255]).join("");
   };
   var toUint8Array = (msg, enc) => {
     if (msg instanceof Uint8Array)
       return msg;
+    if (typeof msg === "string" && enc === "hex")
+      return hexToUint8Array(msg);
     return new Uint8Array(toArray2(msg, enc));
   };
   var toArray2 = (msg, enc) => {
@@ -4936,7 +4774,7 @@
     if (msg === void 0)
       return [];
     if (typeof msg !== "string") {
-      return Array.from(msg, (item) => item | 0);
+      return Array.from(msg, (item) => Math.trunc(item));
     }
     switch (enc) {
       case "hex":
@@ -4956,56 +4794,58 @@
     HEX_CHAR_TO_VALUE2[97 + i] = 10 + i;
   }
   var hexToArray = (msg) => {
+    return Array.from(hexToUint8Array(msg));
+  };
+  var hexToUint8Array = (msg) => {
     assertValidHex(msg);
     const normalized = msg.length % 2 === 0 ? msg : "0" + msg;
-    if (CAN_USE_BUFFER2) {
-      return Array.from(BufferCtor2.from(normalized, "hex"));
+    if (CAN_USE_BUFFER3) {
+      const decoded = BufferCtor3.from(normalized, "hex");
+      return new Uint8Array(decoded.buffer, decoded.byteOffset, decoded.byteLength);
     }
-    const out = new Array(normalized.length / 2);
+    const out = new Uint8Array(normalized.length / 2);
     let o = 0;
     for (let i = 0; i < normalized.length; i += 2) {
-      const hi = HEX_CHAR_TO_VALUE2[normalized.charCodeAt(i)];
-      const lo = HEX_CHAR_TO_VALUE2[normalized.charCodeAt(i + 1)];
+      const hi = HEX_CHAR_TO_VALUE2[normalized.codePointAt(i)];
+      const lo = HEX_CHAR_TO_VALUE2[normalized.codePointAt(i + 1)];
       out[o++] = hi << 4 | lo;
     }
     return out;
   };
-  function base64ToArray(msg) {
-    if (typeof msg !== "string") {
+  var normalizeBase64 = (msg) => {
+    if (typeof msg !== "string")
       throw new TypeError("msg must be a string");
+    const normalized = msg.trim().replaceAll(/[\r\n\t\f\v ]+/g, "").replaceAll("-", "+").replaceAll("_", "/");
+    const padIndex = normalized.indexOf("=");
+    if (padIndex === -1)
+      return normalized;
+    const pad = normalized.slice(padIndex);
+    if (!/^={1,2}$/.test(pad) || normalized.slice(0, padIndex).includes("=")) {
+      throw new Error("Invalid base64 padding");
     }
-    let s2 = msg.trim().replace(/[\r\n\t\f\v ]+/g, "");
-    s2 = s2.replace(/-/g, "+").replace(/_/g, "/");
-    const padIndex = s2.indexOf("=");
-    if (padIndex !== -1) {
-      const pad = s2.slice(padIndex);
-      if (!/^={1,2}$/.test(pad)) {
-        throw new Error("Invalid base64 padding");
-      }
-      if (s2.slice(0, padIndex).includes("=")) {
-        throw new Error("Invalid base64 padding");
-      }
-      s2 = s2.slice(0, padIndex);
-    }
+    return normalized.slice(0, padIndex);
+  };
+  var base64CharacterValue = (codePoint, index) => {
+    if (codePoint >= 65 && codePoint <= 90)
+      return codePoint - 65;
+    if (codePoint >= 97 && codePoint <= 122)
+      return codePoint - 97 + 26;
+    if (codePoint >= 48 && codePoint <= 57)
+      return codePoint - 48 + 52;
+    if (codePoint === 43)
+      return 62;
+    if (codePoint === 47)
+      return 63;
+    throw new Error(`Invalid base64 character at index ${index}`);
+  };
+  function base64ToArray(msg) {
+    const s2 = normalizeBase64(msg);
     const result = [];
     let bitBuffer = 0;
     let bitCount = 0;
     for (let i = 0; i < s2.length; i++) {
-      const c = s2.charCodeAt(i);
-      let v = -1;
-      if (c >= 65 && c <= 90) {
-        v = c - 65;
-      } else if (c >= 97 && c <= 122) {
-        v = c - 97 + 26;
-      } else if (c >= 48 && c <= 57) {
-        v = c - 48 + 52;
-      } else if (c === 43) {
-        v = 62;
-      } else if (c === 47) {
-        v = 63;
-      } else {
-        throw new Error(`Invalid base64 character at index ${i}`);
-      }
+      const c = s2.codePointAt(i);
+      const v = base64CharacterValue(c, i);
       bitBuffer = bitBuffer << 6 | v;
       bitCount += 6;
       while (bitCount >= 8) {
@@ -5020,7 +4860,7 @@
     return Array.from(new TextEncoder().encode(str));
   }
   var toUTF8 = (arr) => {
-    return new TextDecoder().decode(new Uint8Array(arr));
+    return new TextDecoder().decode(arr instanceof Uint8Array ? arr : new Uint8Array(arr));
   };
   var encode = (arr, enc) => {
     switch (enc) {
@@ -5056,16 +4896,16 @@
     if (str === "" || typeof str !== "string") {
       throw new Error(`Expected base58 string but got \u201C${str}\u201D`);
     }
-    const match = str.match(/[IOl0]/gmu);
+    const match = str.match(/[^1-9A-HJ-NP-Za-km-z]/gmu);
     if (match !== null) {
       throw new Error(`Invalid base58 character \u201C${match.join("")}\u201D`);
     }
     const lz = str.match(/^1+/gmu);
-    const psz = lz !== null ? lz[0].length : 0;
+    const psz = lz === null ? 0 : lz[0].length;
     const size = (str.length - psz) * (Math.log(58) / Math.log(256)) + 1 >>> 0;
     const uint8 = new Uint8Array([
       ...new Uint8Array(psz),
-      ...(str.match(/./gmu) ?? []).map((i) => base58chars.indexOf(i)).reduce((acc, i) => {
+      ...Array.from(str).map((i) => base58chars.indexOf(i)).reduce((acc, i) => {
         acc = acc.map((j) => {
           const x = j * 58 + i;
           i = x >> 8;
@@ -5080,31 +4920,35 @@
     return [...uint8];
   };
   var toBase58 = (bin) => {
-    const base58Map = Array(256).fill(-1);
+    const base58Map = Array.from({ length: 256 }, () => -1);
     for (let i = 0; i < base58chars.length; ++i) {
-      base58Map[base58chars.charCodeAt(i)] = i;
+      base58Map[base58chars.codePointAt(i)] = i;
     }
     const result = [];
     for (const byte of bin) {
       let carry = byte;
       for (let j = 0; j < result.length; ++j) {
         const x = (base58Map[result[j]] << 8) + carry;
-        result[j] = base58chars.charCodeAt(x % 58);
-        carry = x / 58 | 0;
+        const quotient = Math.trunc(x / 58);
+        const remainder = x - quotient * 58;
+        result[j] = base58chars.codePointAt(remainder);
+        carry = quotient;
       }
       while (carry !== 0) {
-        result.push(base58chars.charCodeAt(carry % 58));
-        carry = carry / 58 | 0;
+        const quotient = Math.trunc(carry / 58);
+        const remainder = carry - quotient * 58;
+        result.push(base58chars.codePointAt(remainder));
+        carry = quotient;
       }
     }
     for (const byte of bin) {
-      if (byte !== 0)
-        break;
+      if (byte === 0)
+        result.push("1".codePointAt(0));
       else
-        result.push("1".charCodeAt(0));
+        break;
     }
     result.reverse();
-    return String.fromCharCode(...result);
+    return String.fromCodePoint(...result);
   };
   var toBase58Check = (bin, prefix = [0]) => {
     let hash = hash256([...prefix, ...bin]);
@@ -5132,7 +4976,7 @@
     bufs;
     length;
     constructor(bufs) {
-      this.bufs = bufs !== void 0 ? bufs : [];
+      this.bufs = bufs ?? [];
       this.length = 0;
       for (const b of this.bufs)
         this.length += b.length;
@@ -5151,17 +4995,17 @@
     }
     toArray() {
       const totalLength = this.length;
-      const ret = new Array(totalLength);
+      const ret = Array.from({ length: totalLength }, () => 0);
       let offset = 0;
       for (const buf of this.bufs) {
         if (buf instanceof Uint8Array) {
-          for (let i = 0; i < buf.length; i++) {
-            ret[offset++] = buf[i];
+          for (const byte of buf) {
+            ret[offset++] = byte;
           }
         } else {
           const arr = buf;
-          for (let i = 0; i < arr.length; i++) {
-            ret[offset++] = arr[i];
+          for (const item of arr) {
+            ret[offset++] = item;
           }
         }
       }
@@ -5176,23 +5020,20 @@
       return this;
     }
     writeReverse(buf) {
-      const buf2 = new Array(buf.length);
+      const buf2 = Array.from({ length: buf.length }, () => 0);
       for (let i = 0; i < buf2.length; i++) {
         buf2[i] = buf[buf.length - 1 - i];
       }
       return this.write(buf2);
     }
     writeUInt8(n) {
-      const buf = new Array(1);
+      const buf = Array.from({ length: 1 }, () => 0);
       buf[0] = n & 255;
       this.write(buf);
       return this;
     }
     writeInt8(n) {
-      const buf = new Array(1);
-      buf[0] = n & 255;
-      this.write(buf);
-      return this;
+      return this.writeUInt8(n);
     }
     writeUInt16BE(n) {
       const buf = [
@@ -5258,7 +5099,7 @@
     }
     writeUInt64LE(n) {
       if (n === -1) {
-        this.write(new Array(8).fill(255));
+        this.write(Array.from({ length: 8 }, () => 255));
       } else {
         const buf = new BigNumber(n).toArray("be", 8);
         this.writeReverse(buf);
@@ -5331,13 +5172,7 @@
         buf = [253, n & 255, n >> 8 & 255];
       } else if (bn.lt(new BigNumber(4294967296))) {
         const n = bn.toNumber();
-        buf = [
-          254,
-          n & 255,
-          n >> 8 & 255,
-          n >> 16 & 255,
-          n >> 24 & 255
-        ];
+        buf = [254, n & 255, n >> 8 & 255, n >> 16 & 255, n >> 24 & 255];
       } else {
         const bw = new _Writer();
         bw.writeUInt8(255);
@@ -5366,7 +5201,7 @@
       return this.bin.slice(start, end);
     }
     readReverse(len = this.length) {
-      const buf2 = new Array(len);
+      const buf2 = Array.from({ length: len }, () => 0);
       for (let i = 0; i < len; i++) {
         buf2[i] = this.bin[this.pos + len - 1 - i];
       }
@@ -5381,7 +5216,7 @@
     readInt8() {
       const val = this.bin[this.pos];
       this.pos += 1;
-      return (val & 128) !== 0 ? val - 256 : val;
+      return (val & 128) === 0 ? val : val - 256;
     }
     readUInt16BE() {
       const val = this.bin[this.pos] << 8 | this.bin[this.pos + 1];
@@ -5390,7 +5225,7 @@
     }
     readInt16BE() {
       const val = this.readUInt16BE();
-      return (val & 32768) !== 0 ? val - 65536 : val;
+      return (val & 32768) === 0 ? val : val - 65536;
     }
     readUInt16LE() {
       const val = this.bin[this.pos] | this.bin[this.pos + 1] << 8;
@@ -5399,7 +5234,7 @@
     }
     readInt16LE() {
       const val = this.readUInt16LE();
-      const x = (val & 32768) !== 0 ? val - 65536 : val;
+      const x = (val & 32768) === 0 ? val : val - 65536;
       return x;
     }
     readUInt32BE() {
@@ -5412,7 +5247,7 @@
     }
     readInt32BE() {
       const val = this.readUInt32BE();
-      return (val & 2147483648) !== 0 ? val - 4294967296 : val;
+      return (val & 2147483648) === 0 ? val : val - 4294967296;
     }
     readUInt32LE() {
       const val = (this.bin[this.pos] | this.bin[this.pos + 1] << 8 | this.bin[this.pos + 2] << 16 | this.bin[this.pos + 3] << 24) >>> 0;
@@ -5421,7 +5256,7 @@
     }
     readInt32LE() {
       const val = this.readUInt32LE();
-      return (val & 2147483648) !== 0 ? val - 4294967296 : val;
+      return (val & 2147483648) === 0 ? val : val - 4294967296;
     }
     readUInt64BEBn() {
       const bin = this.bin.slice(this.pos, this.pos + 8);
@@ -5492,24 +5327,24 @@
     if (buf.length === 0) {
       return buf;
     }
-    const last = buf[buf.length - 1];
+    const last = buf.at(-1);
     if ((last & 127) !== 0) {
       return buf;
     }
     if (buf.length === 1) {
       return [];
     }
-    if ((buf[buf.length - 2] & 128) !== 0) {
+    if ((buf.at(-2) & 128) !== 0) {
       return buf;
     }
     for (let i = buf.length - 1; i > 0; i--) {
       if (buf[i - 1] !== 0) {
-        if ((buf[i - 1] & 128) !== 0) {
-          buf[i] = last;
-          return buf.slice(0, i + 1);
-        } else {
+        if ((buf[i - 1] & 128) === 0) {
           buf[i - 1] |= last;
           return buf.slice(0, i);
+        } else {
+          buf[i] = last;
+          return buf.slice(0, i + 1);
         }
       }
     }
@@ -5532,1069 +5367,21 @@
     return diff === 0;
   }
 
-  // node_modules/@bsv/sdk/dist/esm/src/primitives/Point.js
-  function ctSwap(swap, a, b) {
-    const mask = -swap;
-    const swapX = (a.X ^ b.X) & mask;
-    const swapY = (a.Y ^ b.Y) & mask;
-    const swapZ = (a.Z ^ b.Z) & mask;
-    a.X ^= swapX;
-    b.X ^= swapX;
-    a.Y ^= swapY;
-    b.Y ^= swapY;
-    a.Z ^= swapZ;
-    b.Z ^= swapZ;
-  }
-  var BI_ZERO = 0n;
-  var BI_ONE = 1n;
-  var BI_TWO = 2n;
-  var BI_THREE = 3n;
-  var BI_FOUR = 4n;
-  var BI_EIGHT = 8n;
-  var P_BIGINT = 0xfffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2fn;
-  var N_BIGINT = 0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141n;
-  var MASK_256 = (1n << 256n) - 1n;
-  function red(x) {
-    let hi = x >> 256n;
-    x = (x & MASK_256) + (hi << 32n) + hi * 977n;
-    hi = x >> 256n;
-    x = (x & MASK_256) + (hi << 32n) + hi * 977n;
-    if (x >= P_BIGINT)
-      x -= P_BIGINT;
-    return x;
-  }
-  var biMod = (a) => red((a % P_BIGINT + P_BIGINT) % P_BIGINT);
-  var biModSub = (a, b) => a >= b ? a - b : P_BIGINT - (b - a);
-  var biModMul = (a, b) => red(a * b);
-  var biModAdd = (a, b) => red(a + b);
-  var biModInv = (a) => {
-    let lm = BI_ONE;
-    let hm = BI_ZERO;
-    let low = biMod(a);
-    let high = P_BIGINT;
-    while (low > BI_ONE) {
-      const r2 = high / low;
-      [lm, hm] = [hm - lm * r2, lm];
-      [low, high] = [high - low * r2, low];
-    }
-    return biMod(lm);
-  };
-  var biModSqr = (a) => biModMul(a, a);
-  var biModPow = (base, exp) => {
-    let result = 1n;
-    base = biMod(base);
-    while (exp > 0n) {
-      if ((exp & 1n) !== 0n) {
-        result = biModMul(result, base);
-      }
-      base = biModMul(base, base);
-      exp >>= 1n;
-    }
-    return result;
-  };
-  var P_PLUS1_DIV4 = P_BIGINT + 1n >> 2n;
-  var biModSqrt = (a) => {
-    const r2 = biModPow(a, P_PLUS1_DIV4);
-    if (biModMul(r2, r2) !== biMod(a)) {
-      return null;
-    }
-    return r2;
-  };
-  var toBigInt = (x) => {
-    if (BigNumber.isBN(x))
-      return BigInt("0x" + x.toString(16));
-    if (typeof x === "string")
-      return BigInt("0x" + x);
-    if (Array.isArray(x))
-      return BigInt("0x" + toHex(x));
-    return BigInt(x);
-  };
-  var GX_BIGINT = BigInt("0x79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798");
-  var GY_BIGINT = BigInt("0x483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8");
-  var WNAF_TABLE_CACHE = /* @__PURE__ */ new Map();
-  var jpDouble = (P2) => {
-    const { X: X1, Y: Y1, Z: Z1 } = P2;
-    if (Y1 === BI_ZERO)
-      return { X: BI_ZERO, Y: BI_ONE, Z: BI_ZERO };
-    const Y1sq = biModMul(Y1, Y1);
-    const S = biModMul(BI_FOUR, biModMul(X1, Y1sq));
-    const M = biModMul(BI_THREE, biModMul(X1, X1));
-    const X3 = biModSub(biModMul(M, M), biModMul(BI_TWO, S));
-    const Y3 = biModSub(biModMul(M, biModSub(S, X3)), biModMul(BI_EIGHT, biModMul(Y1sq, Y1sq)));
-    const Z3 = biModMul(BI_TWO, biModMul(Y1, Z1));
-    return { X: X3, Y: Y3, Z: Z3 };
-  };
-  var jpAdd = (P2, Q) => {
-    if (P2.Z === BI_ZERO)
-      return Q;
-    if (Q.Z === BI_ZERO)
-      return P2;
-    const Z1Z1 = biModMul(P2.Z, P2.Z);
-    const Z2Z2 = biModMul(Q.Z, Q.Z);
-    const U1 = biModMul(P2.X, Z2Z2);
-    const U2 = biModMul(Q.X, Z1Z1);
-    const S1 = biModMul(P2.Y, biModMul(Z2Z2, Q.Z));
-    const S2 = biModMul(Q.Y, biModMul(Z1Z1, P2.Z));
-    const H = biModSub(U2, U1);
-    const r2 = biModSub(S2, S1);
-    if (H === BI_ZERO) {
-      if (r2 === BI_ZERO)
-        return jpDouble(P2);
-      return { X: BI_ZERO, Y: BI_ONE, Z: BI_ZERO };
-    }
-    const HH = biModMul(H, H);
-    const HHH = biModMul(H, HH);
-    const V = biModMul(U1, HH);
-    const X3 = biModSub(biModSub(biModMul(r2, r2), HHH), biModMul(BI_TWO, V));
-    const Y3 = biModSub(biModMul(r2, biModSub(V, X3)), biModMul(S1, HHH));
-    const Z3 = biModMul(H, biModMul(P2.Z, Q.Z));
-    return { X: X3, Y: Y3, Z: Z3 };
-  };
-  var jpNeg = (P2) => {
-    if (P2.Z === BI_ZERO)
-      return P2;
-    return { X: P2.X, Y: P_BIGINT - P2.Y, Z: P2.Z };
-  };
-  var scalarMultiplyWNAF = (k, P0, window2 = 5) => {
-    const key = `${window2}:${P0.x.toString(16)}:${P0.y.toString(16)}`;
-    let tbl = WNAF_TABLE_CACHE.get(key);
-    let P2;
-    if (tbl === void 0) {
-      const tblSize = 1 << window2 - 1;
-      tbl = new Array(tblSize);
-      P2 = { X: P0.x, Y: P0.y, Z: BI_ONE };
-      tbl[0] = P2;
-      const twoP = jpDouble(P2);
-      for (let i = 1; i < tblSize; i++) {
-        tbl[i] = jpAdd(tbl[i - 1], twoP);
-      }
-      WNAF_TABLE_CACHE.set(key, tbl);
-    } else {
-      P2 = tbl[0];
-    }
-    const wnaf = [];
-    const wBig = 1n << BigInt(window2);
-    const wHalf = wBig >> 1n;
-    let kTmp = k;
-    while (kTmp > 0n) {
-      if ((kTmp & BI_ONE) === BI_ZERO) {
-        wnaf.push(0);
-        kTmp >>= BI_ONE;
-      } else {
-        let z = kTmp & wBig - 1n;
-        if (z > wHalf)
-          z -= wBig;
-        wnaf.push(Number(z));
-        kTmp -= z;
-        kTmp >>= BI_ONE;
-      }
-    }
-    let Q = { X: BI_ZERO, Y: BI_ONE, Z: BI_ZERO };
-    for (let i = wnaf.length - 1; i >= 0; i--) {
-      Q = jpDouble(Q);
-      const di = wnaf[i];
-      if (di !== 0) {
-        const idx = Math.abs(di) >> 1;
-        const addend = di > 0 ? tbl[idx] : jpNeg(tbl[idx]);
-        Q = jpAdd(Q, addend);
-      }
-    }
-    return Q;
-  };
-  var modN = (a) => {
-    let r2 = a % N_BIGINT;
-    if (r2 < 0n)
-      r2 += N_BIGINT;
-    return r2;
-  };
-  var modMulN = (a, b) => modN(a * b);
-  var modInvN = (a) => {
-    let lm = 1n;
-    let hm = 0n;
-    let low = modN(a);
-    let high = N_BIGINT;
-    while (low > 1n) {
-      const q = high / low;
-      [lm, hm] = [hm - lm * q, lm];
-      [low, high] = [high - low * q, low];
-    }
-    return modN(lm);
-  };
-  var Point = class _Point extends BasePoint {
-    x;
-    y;
-    inf;
-    static _assertOnCurve(p) {
-      if (!p.validate()) {
-        throw new Error("Invalid point");
-      }
-      return p;
-    }
-    /**
-     * Creates a point object from a given Array. These numbers can represent coordinates in hex format, or points
-     * in multiple established formats.
-     * The function verifies the integrity of the provided data and throws errors if inconsistencies are found.
-     *
-     * @method fromDER
-     * @static
-     * @param bytes - The point representation number array.
-     * @returns Returns a new point representing the given string.
-     * @throws `Error` If the point number[] value has a wrong length.
-     * @throws `Error` If the point format is unknown.
-     *
-     * @example
-     * const derPoint = [ 2, 18, 123, 108, 125, 83, 1, 251, 164, 214, 16, 119, 200, 216, 210, 193, 251, 193, 129, 67, 97, 146, 210, 216, 77, 254, 18, 6, 150, 190, 99, 198, 128 ];
-     * const point = Point.fromDER(derPoint);
-     */
-    static fromDER(bytes2) {
-      const len = 32;
-      if ((bytes2[0] === 4 || bytes2[0] === 6 || bytes2[0] === 7) && bytes2.length - 1 === 2 * len) {
-        if (bytes2[0] === 6) {
-          if (bytes2[bytes2.length - 1] % 2 !== 0) {
-            throw new Error("Point string value is wrong length");
-          }
-        } else if (bytes2[0] === 7) {
-          if (bytes2[bytes2.length - 1] % 2 !== 1) {
-            throw new Error("Point string value is wrong length");
-          }
-        }
-        const res = new _Point(bytes2.slice(1, 1 + len), bytes2.slice(1 + len, 1 + 2 * len));
-        return _Point._assertOnCurve(res);
-      } else if ((bytes2[0] === 2 || bytes2[0] === 3) && bytes2.length - 1 === len) {
-        return _Point._assertOnCurve(_Point.fromX(bytes2.slice(1, 1 + len), bytes2[0] === 3));
-      }
-      throw new Error("Unknown point format");
-    }
-    /**
-     * Creates a point object from a given string. This string can represent coordinates in hex format, or points
-     * in multiple established formats.
-     * The function verifies the integrity of the provided data and throws errors if inconsistencies are found.
-     *
-     * @method fromString
-     * @static
-     *
-     * @param str The point representation string.
-     * @returns Returns a new point representing the given string.
-     * @throws `Error` If the point string value has a wrong length.
-     * @throws `Error` If the point format is unknown.
-     *
-     * @example
-     * const pointStr = 'abcdef';
-     * const point = Point.fromString(pointStr);
-     */
-    static fromString(str) {
-      const bytes2 = toArray2(str, "hex");
-      return _Point._assertOnCurve(_Point.fromDER(bytes2));
-    }
-    /**
-     * Generates a point from an x coordinate and a boolean indicating whether the corresponding
-     * y coordinate is odd.
-     *
-     * @method fromX
-     * @static
-     * @param x - The x coordinate of the point.
-     * @param odd - Boolean indicating whether the corresponding y coordinate is odd or not.
-     * @returns Returns the new point.
-     * @throws `Error` If the point is invalid.
-     *
-     * @example
-     * const xCoordinate = new BigNumber('10');
-     * const point = Point.fromX(xCoordinate, true);
-     */
-    static fromX(x, odd) {
-      let xBigInt = toBigInt(x);
-      xBigInt = biMod(xBigInt);
-      const y2 = biModAdd(biModMul(biModSqr(xBigInt), xBigInt), 7n);
-      const y = biModSqrt(y2);
-      if (y === null) {
-        throw new Error("Invalid point");
-      }
-      let yBig = y;
-      if ((yBig & BI_ONE) !== (odd ? BI_ONE : BI_ZERO)) {
-        yBig = biModSub(P_BIGINT, yBig);
-      }
-      const xBN = new BigNumber(xBigInt.toString(16), 16);
-      const yBN = new BigNumber(yBig.toString(16), 16);
-      return _Point._assertOnCurve(new _Point(xBN, yBN));
-    }
-    /**
-     * Generates a point from a serialized JSON object. The function accounts for different options in the JSON object,
-     * including precomputed values for optimization of EC operations, and calls another helper function to turn nested
-     * JSON points into proper Point objects.
-     *
-     * @method fromJSON
-     * @static
-     * @param obj - An object or array that holds the data for the point.
-     * @param isRed - A boolean to direct how the Point is constructed from the JSON object.
-     * @returns Returns a new point based on the deserialized JSON object.
-     *
-     * @example
-     * const serializedPoint = '{"x":52,"y":15}';
-     * const point = Point.fromJSON(serializedPoint, true);
-     */
-    static fromJSON(obj, isRed) {
-      if (typeof obj === "string") {
-        obj = JSON.parse(obj);
-      }
-      let res = new _Point(obj[0], obj[1], isRed);
-      res = _Point._assertOnCurve(res);
-      if (typeof obj[2] !== "object" || obj[2] === null) {
-        return res;
-      }
-      const pre = obj[2];
-      const obj2point = (p) => {
-        const pt = new _Point(p[0], p[1], isRed);
-        return _Point._assertOnCurve(pt);
-      };
-      res.precomputed = {
-        beta: null,
-        doubles: typeof pre.doubles === "object" && pre.doubles !== null ? {
-          step: pre.doubles.step,
-          points: [res].concat(pre.doubles.points.map(obj2point))
-        } : void 0,
-        naf: typeof pre.naf === "object" && pre.naf !== null ? {
-          wnd: pre.naf.wnd,
-          points: [res].concat(pre.naf.points.map(obj2point))
-        } : void 0
-      };
-      return res;
-    }
-    /**
-     * @constructor
-     * @param x - The x-coordinate of the point. May be a number, a BigNumber, a string (which will be interpreted as hex), a number array, or null. If null, an "Infinity" point is constructed.
-     * @param y - The y-coordinate of the point, similar to x.
-     * @param isRed - A boolean indicating if the point is a member of the field of integers modulo the k256 prime. Default is true.
-     *
-     * @example
-     * new Point('abc123', 'def456');
-     * new Point(null, null); // Generates Infinity point.
-     */
-    constructor(x, y, isRed = true) {
-      super("affine");
-      this.precomputed = null;
-      if (x === null && y === null) {
-        this.x = null;
-        this.y = null;
-        this.inf = true;
-      } else {
-        if (!BigNumber.isBN(x)) {
-          x = new BigNumber(x, 16);
-        }
-        this.x = x;
-        if (!BigNumber.isBN(y)) {
-          y = new BigNumber(y, 16);
-        }
-        this.y = y;
-        if (isRed) {
-          this.x.forceRed(this.curve.red);
-          this.y.forceRed(this.curve.red);
-        }
-        if (this.x.red === null) {
-          this.x = this.x.toRed(this.curve.red);
-        }
-        if (this.y.red === null) {
-          this.y = this.y.toRed(this.curve.red);
-        }
-        this.inf = false;
-      }
-    }
-    /**
-     * Validates if a point belongs to the curve. Follows the short Weierstrass
-     * equation for elliptic curves: y^2 = x^3 + ax + b.
-     *
-     * @method validate
-     * @returns {boolean} true if the point is on the curve, false otherwise.
-     *
-     * @example
-     * const aPoint = new Point(x, y);
-     * const isValid = aPoint.validate();
-     */
-    validate() {
-      if (this.inf || this.x == null || this.y == null)
-        return false;
-      try {
-        const xBig = BigInt("0x" + this.x.fromRed().toString(16));
-        const yBig = BigInt("0x" + this.y.fromRed().toString(16));
-        const lhs = biModMul(yBig, yBig);
-        const rhs = biModAdd(biModMul(biModMul(xBig, xBig), xBig), 7n);
-        return lhs === rhs;
-      } catch {
-        return false;
-      }
-    }
-    /**
-     * Encodes the coordinates of a point into an array or a hexadecimal string.
-     * The details of encoding are determined by the optional compact and enc parameters.
-     *
-     * @method encode
-     * @param compact - If true, an additional prefix byte 0x02 or 0x03 based on the 'y' coordinate being even or odd respectively is used. If false, byte 0x04 is used.
-     * @param enc - Expects the string 'hex' if hexadecimal string encoding is required instead of an array of numbers.
-     * @throws Will throw an error if the specified encoding method is not recognized. Expects 'hex'.
-     * @returns If enc is undefined, a byte array representation of the point will be returned. if enc is 'hex', a hexadecimal string representation of the point will be returned.
-     *
-     * @example
-     * const aPoint = new Point(x, y);
-     * const encodedPointArray = aPoint.encode();
-     * const encodedPointHex = aPoint.encode(true, 'hex');
-     */
-    encode(compact = true, enc) {
-      if (this.inf) {
-        if (enc === "hex")
-          return "00";
-        return [0];
-      }
-      const len = this.curve.p.byteLength();
-      const x = this.getX().toArray("be", len);
-      let res;
-      if (compact) {
-        res = [this.getY().isEven() ? 2 : 3].concat(x);
-      } else {
-        res = [4].concat(x, this.getY().toArray("be", len));
-      }
-      if (enc !== "hex") {
-        return res;
-      } else {
-        return toHex(res);
-      }
-    }
-    /**
-     * Converts the point coordinates to a hexadecimal string. A wrapper method
-     * for encode. Byte 0x02 or 0x03 is used as prefix based on the 'y' coordinate being even or odd respectively.
-     *
-     * @method toString
-     * @returns {string} A hexadecimal string representation of the point coordinates.
-     *
-     * @example
-     * const aPoint = new Point(x, y);
-     * const stringPoint = aPoint.toString();
-     */
-    toString() {
-      return this.encode(true, "hex");
-    }
-    /**
-     * Exports the x and y coordinates of the point, and the precomputed doubles and non-adjacent form (NAF) for optimization. The output is an array.
-     *
-     * @method toJSON
-     * @returns An Array where first two elements are the coordinates of the point and optional third element is an object with doubles and NAF points.
-     *
-     * @example
-     * const aPoint = new Point(x, y);
-     * const jsonPoint = aPoint.toJSON();
-     */
-    toJSON() {
-      if (this.precomputed == null) {
-        return [this.x, this.y];
-      }
-      return [
-        this.x,
-        this.y,
-        typeof this.precomputed === "object" && this.precomputed !== null ? {
-          doubles: this.precomputed.doubles != null ? {
-            step: this.precomputed.doubles.step,
-            points: this.precomputed.doubles.points.slice(1)
-          } : void 0,
-          naf: this.precomputed.naf != null ? {
-            wnd: this.precomputed.naf.wnd,
-            points: this.precomputed.naf.points.slice(1)
-          } : void 0
-        } : void 0
-      ];
-    }
-    /**
-     * Provides the point coordinates in a human-readable string format for debugging purposes.
-     *
-     * @method inspect
-     * @returns String of the format '<EC Point x: x-coordinate y: y-coordinate>', or '<EC Point Infinity>' if the point is at infinity.
-     *
-     * @example
-     * const aPoint = new Point(x, y);
-     * console.log(aPoint.inspect());
-     */
-    inspect() {
-      if (this.isInfinity()) {
-        return "<EC Point Infinity>";
-      }
-      return "<EC Point x: " + (this.x?.fromRed()?.toString(16, 2) ?? "undefined") + " y: " + (this.y?.fromRed()?.toString(16, 2) ?? "undefined") + ">";
-    }
-    /**
-     * Checks if the point is at infinity.
-     * @method isInfinity
-     * @returns Returns whether or not the point is at infinity.
-     *
-     * @example
-     * const p = new Point(null, null);
-     * console.log(p.isInfinity()); // outputs: true
-     */
-    isInfinity() {
-      return this.inf;
-    }
-    /**
-     * Adds another Point to this Point, returning a new Point.
-     *
-     * @method add
-     * @param p - The Point to add to this one.
-     * @returns A new Point that results from the addition.
-     *
-     * @example
-     * const p1 = new Point(1, 2);
-     * const p2 = new Point(2, 3);
-     * const result = p1.add(p2);
-     */
-    add(p) {
-      if (this.inf) {
-        return p;
-      }
-      if (p.inf) {
-        return this;
-      }
-      if (this.eq(p)) {
-        return this.dbl();
-      }
-      if (this.neg().eq(p)) {
-        return new _Point(null, null);
-      }
-      if (this.x?.cmp(p.x ?? new BigNumber(0)) === 0) {
-        return new _Point(null, null);
-      }
-      const P1 = {
-        X: BigInt("0x" + this.x.fromRed().toString(16)),
-        Y: BigInt("0x" + this.y.fromRed().toString(16)),
-        Z: BI_ONE
-      };
-      const Q1 = {
-        X: BigInt("0x" + p.x.fromRed().toString(16)),
-        Y: BigInt("0x" + p.y.fromRed().toString(16)),
-        Z: BI_ONE
-      };
-      const R2 = jpAdd(P1, Q1);
-      if (R2.Z === BI_ZERO)
-        return new _Point(null, null);
-      const zInv = biModInv(R2.Z);
-      const zInv2 = biModMul(zInv, zInv);
-      const xRes = biModMul(R2.X, zInv2);
-      const yRes = biModMul(R2.Y, biModMul(zInv2, zInv));
-      return new _Point(xRes.toString(16), yRes.toString(16));
-    }
-    /**
-     * Doubles the current point.
-     *
-     * @method dbl
-     *
-     * @example
-     * const P = new Point('123', '456');
-     * const result = P.dbl();
-     * */
-    dbl() {
-      if (this.inf)
-        return this;
-      if (this.x === null || this.y === null) {
-        throw new Error("Point coordinates cannot be null");
-      }
-      const X = BigInt("0x" + this.x.fromRed().toString(16));
-      const Y = BigInt("0x" + this.y.fromRed().toString(16));
-      if (Y === BI_ZERO)
-        return new _Point(null, null);
-      const R2 = jpDouble({ X, Y, Z: BI_ONE });
-      const zInv = biModInv(R2.Z);
-      const zInv2 = biModMul(zInv, zInv);
-      const xRes = biModMul(R2.X, zInv2);
-      const yRes = biModMul(R2.Y, biModMul(zInv2, zInv));
-      return new _Point(xRes.toString(16), yRes.toString(16));
-    }
-    /**
-     * Returns X coordinate of point
-     *
-     * @example
-     * const P = new Point('123', '456');
-     * const x = P.getX();
-     */
-    getX() {
-      return (this.x ?? new BigNumber(0)).fromRed();
-    }
-    /**
-     * Returns X coordinate of point
-     *
-     * @example
-     * const P = new Point('123', '456');
-     * const x = P.getX();
-     */
-    getY() {
-      return (this.y ?? new BigNumber(0)).fromRed();
-    }
-    /**
-     * Multiplies this Point by a scalar value, returning a new Point.
-     *
-     * @method mul
-     * @param k - The scalar value to multiply this Point by.
-     * @returns  A new Point that results from the multiplication.
-     *
-     * @example
-     * const p = new Point(1, 2);
-     * const result = p.mul(2); // this doubles the Point
-     */
-    mul(k) {
-      if (!BigNumber.isBN(k)) {
-        k = new BigNumber(k, 16);
-      }
-      k = k;
-      if (this.inf) {
-        return this;
-      }
-      const isNeg = k.isNeg();
-      const kAbs = isNeg ? k.neg() : k;
-      let kBig = BigInt("0x" + kAbs.toString(16));
-      kBig = biMod(kBig);
-      if (kBig === BI_ZERO) {
-        return new _Point(null, null);
-      }
-      if (kBig === BI_ZERO) {
-        return new _Point(null, null);
-      }
-      if (this.x === null || this.y === null) {
-        throw new Error("Point coordinates cannot be null");
-      }
-      let Px;
-      let Py;
-      if (this === this.curve.g) {
-        Px = GX_BIGINT;
-        Py = GY_BIGINT;
-      } else {
-        Px = BigInt("0x" + this.x.fromRed().toString(16));
-        Py = BigInt("0x" + this.y.fromRed().toString(16));
-      }
-      const R2 = scalarMultiplyWNAF(kBig, { x: Px, y: Py });
-      if (R2.Z === BI_ZERO) {
-        return new _Point(null, null);
-      }
-      const zInv = biModInv(R2.Z);
-      const zInv2 = biModMul(zInv, zInv);
-      const xRes = biModMul(R2.X, zInv2);
-      const yRes = biModMul(R2.Y, biModMul(zInv2, zInv));
-      const xBN = new BigNumber(xRes.toString(16), 16);
-      const yBN = new BigNumber(yRes.toString(16), 16);
-      const result = new _Point(xBN, yBN);
-      if (isNeg) {
-        return result.neg();
-      }
-      return result;
-    }
-    mulCT(k) {
-      if (!BigNumber.isBN(k)) {
-        k = new BigNumber(k, 16);
-      }
-      k = k;
-      if (this.inf)
-        return new _Point(null, null);
-      const isNeg = k.isNeg();
-      const kAbs = isNeg ? k.neg() : k;
-      let kBig = BigInt("0x" + kAbs.toString(16));
-      kBig = biMod(kBig);
-      if (kBig === 0n)
-        return new _Point(null, null);
-      const Px = this === this.curve.g ? GX_BIGINT : BigInt("0x" + this.getX().toString(16));
-      const Py = this === this.curve.g ? GY_BIGINT : BigInt("0x" + this.getY().toString(16));
-      let R0 = { X: 0n, Y: 1n, Z: 0n };
-      let R1 = { X: Px, Y: Py, Z: 1n };
-      const bits = kBig.toString(2);
-      for (let i = 0; i < bits.length; i++) {
-        const bit = bits[i] === "1" ? 1n : 0n;
-        ctSwap(bit, R0, R1);
-        R1 = jpAdd(R0, R1);
-        R0 = jpDouble(R0);
-        ctSwap(bit, R0, R1);
-      }
-      if (R0.Z === 0n)
-        return new _Point(null, null);
-      const zInv = biModInv(R0.Z);
-      const zInv2 = biModMul(zInv, zInv);
-      const x = biModMul(R0.X, zInv2);
-      const y = biModMul(R0.Y, biModMul(zInv2, zInv));
-      const result = new _Point(x.toString(16), y.toString(16));
-      return isNeg ? result.neg() : result;
-    }
-    /**
-     * Performs a multiplication and addition operation in a single step.
-     * Multiplies this Point by k1, adds the resulting Point to the result of p2 multiplied by k2.
-     *
-     * @method mulAdd
-     * @param k1 - The scalar value to multiply this Point by.
-     * @param p2 - The other Point to be involved in the operation.
-     * @param k2 - The scalar value to multiply the Point p2 by.
-     * @returns A Point that results from the combined multiplication and addition operations.
-     *
-     * @example
-     * const p1 = new Point(1, 2);
-     * const p2 = new Point(2, 3);
-     * const result = p1.mulAdd(2, p2, 3);
-     */
-    mulAdd(k1, p2, k2) {
-      const points = [this, p2];
-      const coeffs = [k1, k2];
-      return this._endoWnafMulAdd(points, coeffs);
-    }
-    /**
-     * Performs the Jacobian multiplication and addition operation in a single
-     * step. Instead of returning a regular Point, the result is a JacobianPoint.
-     *
-     * @method jmulAdd
-     * @param k1 - The scalar value to multiply this Point by.
-     * @param p2 - The other Point to be involved in the operation
-     * @param k2 - The scalar value to multiply the Point p2 by.
-     * @returns A JacobianPoint that results from the combined multiplication and addition operation.
-     *
-     * @example
-     * const p1 = new Point(1, 2);
-     * const p2 = new Point(2, 3);
-     * const result = p1.jmulAdd(2, p2, 3);
-     */
-    jmulAdd(k1, p2, k2) {
-      const points = [this, p2];
-      const coeffs = [k1, k2];
-      return this._endoWnafMulAdd(points, coeffs, true);
-    }
-    /**
-     * Checks if the Point instance is equal to another given Point.
-     *
-     * @method eq
-     * @param p - The Point to be checked if equal to the current instance.
-     *
-     * @returns Whether the two Point instances are equal. Both the 'x' and 'y' coordinates have to match, and both points have to either be valid or at infinity for equality. If both conditions are true, it returns true, else it returns false.
-     *
-     * @example
-     * const p1 = new Point(5, 20);
-     * const p2 = new Point(5, 20);
-     * const areEqual = p1.eq(p2); // returns true
-     */
-    eq(p) {
-      return this === p || this.inf === p.inf && (this.inf || (this.x ?? new BigNumber(0)).cmp(p.x ?? new BigNumber(0)) === 0 && (this.y ?? new BigNumber(0)).cmp(p.y ?? new BigNumber(0)) === 0);
-    }
-    /**
-     * Negate a point. The negation of a point P is the mirror of P about x-axis.
-     *
-     * @method neg
-     *
-     * @example
-     * const P = new Point('123', '456');
-     * const result = P.neg();
-     */
-    neg(_precompute) {
-      if (this.inf) {
-        return this;
-      }
-      const res = new _Point(this.x, (this.y ?? new BigNumber(0)).redNeg());
-      if (_precompute === true && this.precomputed != null) {
-        const pre = this.precomputed;
-        const negate = (p) => p.neg();
-        res.precomputed = {
-          naf: pre.naf != null ? {
-            wnd: pre.naf.wnd,
-            points: pre.naf.points.map(negate)
-          } : void 0,
-          doubles: pre.doubles != null ? {
-            step: pre.doubles.step,
-            points: pre.doubles.points.map((p) => p.neg())
-          } : void 0,
-          beta: void 0
-        };
-      }
-      return res;
-    }
-    /**
-     * Performs the "doubling" operation on the Point a given number of times.
-     * This is used in elliptic curve operations to perform multiplication by 2, multiple times.
-     * If the point is at infinity, it simply returns the point because doubling
-     * a point at infinity is still infinity.
-     *
-     * @method dblp
-     * @param k - The number of times the "doubling" operation is to be performed on the Point.
-     * @returns The Point after 'k' "doubling" operations have been performed.
-     *
-     * @example
-     * const p = new Point(5, 20);
-     * const doubledPoint = p.dblp(10); // returns the point after "doubled" 10 times
-     */
-    dblp(k) {
-      let r2 = this;
-      for (let i = 0; i < k; i++) {
-        r2 = r2.dbl();
-      }
-      return r2;
-    }
-    /**
-     * Converts the point to a Jacobian point. If the point is at infinity, the corresponding Jacobian point
-     * will also be at infinity.
-     *
-     * @method toJ
-     * @returns Returns a new Jacobian point based on the current point.
-     *
-     * @example
-     * const point = new Point(xCoordinate, yCoordinate);
-     * const jacobianPoint = point.toJ();
-     */
-    toJ() {
-      if (this.inf) {
-        return new JacobianPoint(null, null, null);
-      }
-      const res = new JacobianPoint(this.x, this.y, this.curve.one);
-      return res;
-    }
-    _getBeta() {
-      if (typeof this.curve.endo !== "object") {
-        return;
-      }
-      const pre = this.precomputed;
-      if (typeof pre === "object" && pre !== null && typeof pre.beta === "object" && pre.beta !== null) {
-        return pre.beta;
-      }
-      const beta = new _Point((this.x ?? new BigNumber(0)).redMul(this.curve.endo.beta), this.y);
-      if (pre != null) {
-        const curve2 = this.curve;
-        const endoMul = (p) => {
-          if (p.x === null) {
-            throw new Error("p.x is null");
-          }
-          if (curve2.endo === void 0 || curve2.endo === null) {
-            throw new Error("curve.endo is undefined");
-          }
-          return new _Point(p.x.redMul(curve2.endo.beta), p.y);
-        };
-        pre.beta = beta;
-        beta.precomputed = {
-          beta: null,
-          naf: pre.naf != null ? {
-            wnd: pre.naf.wnd,
-            points: pre.naf.points.map(endoMul)
-          } : void 0,
-          doubles: pre.doubles != null ? {
-            step: pre.doubles.step,
-            points: pre.doubles.points.map(endoMul)
-          } : void 0
-        };
-      }
-      return beta;
-    }
-    _fixedNafMul(k) {
-      if (typeof this.precomputed !== "object" || this.precomputed === null) {
-        throw new Error("_fixedNafMul requires precomputed values for the point");
-      }
-      const doubles = this._getDoubles();
-      const naf = this.curve.getNAF(k, 1, this.curve._bitLength);
-      let I = (1 << doubles.step + 1) - (doubles.step % 2 === 0 ? 2 : 1);
-      I /= 3;
-      const repr = [];
-      for (let j = 0; j < naf.length; j += doubles.step) {
-        let nafW = 0;
-        for (let k2 = j + doubles.step - 1; k2 >= j; k2--) {
-          nafW = (nafW << 1) + naf[k2];
-        }
-        repr.push(nafW);
-      }
-      let a = new JacobianPoint(null, null, null);
-      let b = new JacobianPoint(null, null, null);
-      for (let i = I; i > 0; i--) {
-        for (let j = 0; j < repr.length; j++) {
-          const nafW = repr[j];
-          if (nafW === i) {
-            b = b.mixedAdd(doubles.points[j]);
-          } else if (nafW === -i) {
-            b = b.mixedAdd(doubles.points[j].neg());
-          }
-        }
-        a = a.add(b);
-      }
-      return a.toP();
-    }
-    _wnafMulAdd(defW, points, coeffs, len, jacobianResult) {
-      const wndWidth = this.curve._wnafT1.map((num) => num.toNumber());
-      const wnd = this.curve._wnafT2.map(() => []);
-      const naf = this.curve._wnafT3.map(() => []);
-      let max = 0;
-      for (let i = 0; i < len; i++) {
-        const p = points[i];
-        const nafPoints = p._getNAFPoints(defW);
-        wndWidth[i] = nafPoints.wnd;
-        wnd[i] = nafPoints.points;
-      }
-      for (let i = len - 1; i >= 1; i -= 2) {
-        const a = i - 1;
-        const b = i;
-        if (wndWidth[a] !== 1 || wndWidth[b] !== 1) {
-          naf[a] = this.curve.getNAF(coeffs[a], wndWidth[a], this.curve._bitLength);
-          naf[b] = this.curve.getNAF(coeffs[b], wndWidth[b], this.curve._bitLength);
-          max = Math.max(naf[a].length, max);
-          max = Math.max(naf[b].length, max);
-          continue;
-        }
-        const comb = [
-          points[a],
-          null,
-          null,
-          points[b]
-          /* 7 */
-        ];
-        if ((points[a].y ?? new BigNumber(0)).cmp(points[b].y ?? new BigNumber(0)) === 0) {
-          comb[1] = points[a].add(points[b]);
-          comb[2] = points[a].toJ().mixedAdd(points[b].neg());
-        } else if ((points[a].y ?? new BigNumber(0)).cmp((points[b].y ?? new BigNumber(0)).redNeg()) === 0) {
-          comb[1] = points[a].toJ().mixedAdd(points[b]);
-          comb[2] = points[a].add(points[b].neg());
-        } else {
-          comb[1] = points[a].toJ().mixedAdd(points[b]);
-          comb[2] = points[a].toJ().mixedAdd(points[b].neg());
-        }
-        const index = [
-          -3,
-          -1,
-          -5,
-          -7,
-          0,
-          7,
-          5,
-          1,
-          3
-          /* 1 1 */
-        ];
-        const jsf = this.curve.getJSF(coeffs[a], coeffs[b]);
-        max = Math.max(jsf[0].length, max);
-        naf[a] = new Array(max);
-        naf[b] = new Array(max);
-        for (let j = 0; j < max; j++) {
-          const ja = jsf[0][j] | 0;
-          const jb = jsf[1][j] | 0;
-          naf[a][j] = index[(ja + 1) * 3 + (jb + 1)];
-          naf[b][j] = 0;
-          wnd[a] = comb;
-        }
-      }
-      let acc = new JacobianPoint(null, null, null);
-      const tmp = this.curve._wnafT4;
-      for (let i = max; i >= 0; i--) {
-        let k = 0;
-        while (i >= 0) {
-          let zero = true;
-          for (let j = 0; j < len; j++) {
-            tmp[j] = new BigNumber(typeof naf[j][i] === "number" ? naf[j][i] : 0);
-            if (!tmp[j].isZero()) {
-              zero = false;
-            }
-          }
-          if (!zero) {
-            break;
-          }
-          k++;
-          i--;
-        }
-        if (i >= 0) {
-          k++;
-        }
-        acc = acc.dblp(k);
-        if (i < 0) {
-          break;
-        }
-        const one = new BigNumber(1);
-        const two = new BigNumber(2);
-        for (let j = 0; j < len; j++) {
-          const z = tmp[j];
-          let p;
-          if (z.cmpn(0) === 0) {
-            continue;
-          } else if (!z.isNeg()) {
-            p = wnd[j][z.sub(one).div(two).toNumber()];
-          } else {
-            p = wnd[j][z.neg().sub(one).div(two).toNumber()].neg();
-          }
-          if (p.type === "affine") {
-            acc = acc.mixedAdd(p);
-          } else {
-            acc = acc.add(p);
-          }
-        }
-      }
-      for (let i = 0; i < len; i++) {
-        wnd[i] = [];
-      }
-      if (jacobianResult === true) {
-        return acc;
-      } else {
-        return acc.toP();
-      }
-    }
-    _endoWnafMulAdd(points, coeffs, jacobianResult) {
-      const npoints = new Array(points.length * 2);
-      const ncoeffs = new Array(points.length * 2);
-      let i;
-      for (i = 0; i < points.length; i++) {
-        const split2 = this.curve._endoSplit(coeffs[i]);
-        let p = points[i];
-        let beta = p._getBeta() ?? new _Point(null, null);
-        if (split2.k1.negative !== 0) {
-          split2.k1.ineg();
-          p = p.neg(true);
-        }
-        if (split2.k2.negative !== 0) {
-          split2.k2.ineg();
-          beta = beta.neg(true);
-        }
-        npoints[i * 2] = p;
-        npoints[i * 2 + 1] = beta;
-        ncoeffs[i * 2] = split2.k1;
-        ncoeffs[i * 2 + 1] = split2.k2;
-      }
-      const res = this._wnafMulAdd(1, npoints, ncoeffs, i * 2, jacobianResult);
-      for (let j = 0; j < i * 2; j++) {
-        npoints[j] = null;
-        ncoeffs[j] = null;
-      }
-      return res;
-    }
-    _hasDoubles(k) {
-      if (this.precomputed == null) {
-        return false;
-      }
-      const doubles = this.precomputed.doubles;
-      if (typeof doubles !== "object") {
-        return false;
-      }
-      return doubles.points.length >= Math.ceil((k.bitLength() + 1) / doubles.step);
-    }
-    _getDoubles(step, power) {
-      if (typeof this.precomputed === "object" && this.precomputed !== null && typeof this.precomputed.doubles === "object" && this.precomputed.doubles !== null) {
-        return this.precomputed.doubles;
-      }
-      const doubles = [this];
-      let acc = this;
-      for (let i = 0; i < (power ?? 0); i += step ?? 1) {
-        for (let j = 0; j < (step ?? 1); j++) {
-          acc = acc.dbl();
-        }
-        doubles.push(acc);
-      }
-      return {
-        step: step ?? 1,
-        points: doubles
-      };
-    }
-    _getNAFPoints(wnd) {
-      if (typeof this.precomputed === "object" && this.precomputed !== null && typeof this.precomputed.naf === "object" && this.precomputed.naf !== null) {
-        return this.precomputed.naf;
-      }
-      const res = [this];
-      const max = (1 << wnd) - 1;
-      const dbl = max === 1 ? null : this.dbl();
-      for (let i = 1; i < max; i++) {
-        if (dbl !== null) {
-          res[i] = res[i - 1].add(dbl);
-        }
-      }
-      return {
-        wnd,
-        points: res
-      };
-    }
-  };
-
   // node_modules/@bsv/sdk/dist/esm/src/primitives/Curve.js
   var globalCurve;
+  function normalizedMod4(value, carry) {
+    const mod4 = value.andln(3) + carry & 3;
+    return mod4 === 3 ? -1 : mod4;
+  }
+  function jsfDigit(value, carry, mod4, otherMod4) {
+    if ((mod4 & 1) === 0)
+      return 0;
+    const mod8 = value.andln(7) + carry & 7;
+    return (mod8 === 3 || mod8 === 5) && otherMod4 === 2 ? -mod4 : mod4;
+  }
+  function nextJsfCarry(carry, digit) {
+    return 2 * carry === digit + 1 ? 1 - carry : carry;
+  }
   var Curve = class _Curve {
     p;
     red;
@@ -6625,7 +5412,7 @@
       }
     }
     getNAF(num, w, bits) {
-      const naf = new Array(Math.max(num.bitLength(), bits) + 1);
+      const naf = Array.from({ length: Math.max(num.bitLength(), bits) + 1 }, () => 0);
       naf.fill(0);
       const ws = 1 << w + 1;
       const k = num.clone();
@@ -6655,44 +5442,14 @@
       let d1 = 0;
       let d2 = 0;
       while (k1.cmpn(-d1) > 0 || k2.cmpn(-d2) > 0) {
-        let m14 = k1.andln(3) + d1 & 3;
-        let m24 = k2.andln(3) + d2 & 3;
-        if (m14 === 3) {
-          m14 = -1;
-        }
-        if (m24 === 3) {
-          m24 = -1;
-        }
-        let u1;
-        if ((m14 & 1) === 0) {
-          u1 = 0;
-        } else {
-          const m8 = k1.andln(7) + d1 & 7;
-          if ((m8 === 3 || m8 === 5) && m24 === 2) {
-            u1 = -m14;
-          } else {
-            u1 = m14;
-          }
-        }
+        const m14 = normalizedMod4(k1, d1);
+        const m24 = normalizedMod4(k2, d2);
+        const u1 = jsfDigit(k1, d1, m14, m24);
         jsf[0].push(u1);
-        let u2;
-        if ((m24 & 1) === 0) {
-          u2 = 0;
-        } else {
-          const m8 = k2.andln(7) + d2 & 7;
-          if ((m8 === 3 || m8 === 5) && m14 === 2) {
-            u2 = -m24;
-          } else {
-            u2 = m24;
-          }
-        }
+        const u2 = jsfDigit(k2, d2, m24, m14);
         jsf[1].push(u2);
-        if (2 * d1 === u1 + 1) {
-          d1 = 1 - d1;
-        }
-        if (2 * d2 === u2 + 1) {
-          d2 = 1 - d2;
-        }
+        d1 = nextJsfCarry(d1, u1);
+        d2 = nextJsfCarry(d2, u2);
         k1.iushrn(1);
         k2.iushrn(1);
       }
@@ -6701,8 +5458,10 @@
     static cachedProperty(obj, name, computer) {
       const key = "_" + name;
       obj.prototype[name] = function cachedProperty() {
-        const r2 = this[key] !== void 0 ? this[key] : this[key] = computer.call(this);
-        return r2;
+        if (this[key] === void 0) {
+          this[key] = computer.call(this);
+        }
+        return this[key];
       };
     }
     static parseBytes(bytes2) {
@@ -6712,10 +5471,10 @@
       return new BigNumber(bytes2, "hex", "le");
     }
     constructor() {
-      if (typeof globalCurve !== "undefined") {
-        return globalCurve;
-      } else {
+      if (globalCurve === void 0) {
         globalCurve = this;
+      } else {
+        return globalCurve;
       }
       const precomputed = {
         doubles: {
@@ -7531,10 +6290,10 @@
       this.two = new BigNumber(2).toRed(this.red);
       this.n = new BigNumber(conf.n, 16);
       this.g = Point.fromJSON(conf.g, conf.gRed);
-      this._wnafT1 = new Array(4);
-      this._wnafT2 = new Array(4);
-      this._wnafT3 = new Array(4);
-      this._wnafT4 = new Array(4);
+      this._wnafT1 = Array.from({ length: 4 }, () => void 0);
+      this._wnafT2 = Array.from({ length: 4 }, () => void 0);
+      this._wnafT3 = Array.from({ length: 4 }, () => void 0);
+      this._wnafT4 = Array.from({ length: 4 }, () => void 0);
       this._bitLength = this.n.bitLength();
       this.redN = this.n.toRed(this.red);
       this.a = new BigNumber(conf.a, 16).toRed(this.red);
@@ -7543,68 +6302,62 @@
       this.zeroA = this.a.fromRed().cmpn(0) === 0;
       this.threeA = this.a.fromRed().sub(this.p).cmpn(-3) === 0;
       this.endo = this._getEndomorphism(conf);
-      this._endoWnafT1 = new Array(4);
-      this._endoWnafT2 = new Array(4);
+      this._endoWnafT1 = Array.from({ length: 4 }, () => void 0);
+      this._endoWnafT2 = Array.from({ length: 4 }, () => void 0);
     }
     _getEndomorphism(conf) {
       if (!this.zeroA || this.p.modrn(3) !== 1) {
         return;
       }
-      let beta;
-      let lambda;
-      if (conf.beta !== void 0) {
-        beta = new BigNumber(conf.beta, 16).toRed(this.red);
-      } else {
-        const betas = this._getEndoRoots(this.p);
-        if (betas === null) {
-          throw new Error("Failed to get endomorphism roots for beta.");
-        }
-        beta = betas[0].cmp(betas[1]) < 0 ? betas[0] : betas[1];
-        beta = beta.toRed(this.red);
-      }
-      if (conf.lambda !== void 0) {
-        lambda = new BigNumber(conf.lambda, 16);
-      } else {
-        const lambdas = this._getEndoRoots(this.n);
-        if (lambdas === null) {
-          throw new Error("Failed to get endomorphism roots for lambda.");
-        }
-        if (this.g == null) {
-          throw new Error("Curve generator point (g) is not defined.");
-        }
-        const gMulX = this.g.mul(lambdas[0])?.x;
-        const gXRedMulBeta = this.g.x != null ? this.g.x.redMul(beta) : void 0;
-        if (gMulX != null && gXRedMulBeta != null && gMulX.cmp(gXRedMulBeta) === 0) {
-          lambda = lambdas[0];
-        } else {
-          lambda = lambdas[1];
-          if (this.g == null) {
-            throw new Error("Curve generator point (g) is not defined.");
-          }
-          const gMulX2 = this.g.mul(lambda)?.x;
-          const gXRedMulBeta2 = this.g.x != null ? this.g.x.redMul(beta) : void 0;
-          if (gMulX2 == null || gXRedMulBeta2 == null) {
-            throw new Error("Lambda computation failed: g.mul(lambda).x or g.x.redMul(beta) is undefined.");
-          }
-          _Curve.assert(gMulX2.cmp(gXRedMulBeta2) === 0, "Lambda selection does not match computed beta.");
-        }
-      }
-      let basis;
-      if (typeof conf.basis === "object" && conf.basis !== null) {
-        basis = conf.basis.map(function(vec) {
-          return {
-            a: new BigNumber(vec.a, 16),
-            b: new BigNumber(vec.b, 16)
-          };
-        });
-      } else {
-        basis = this._getEndoBasis(lambda);
-      }
+      const beta = this._resolveEndomorphismBeta(conf);
+      const lambda = this._resolveEndomorphismLambda(conf, beta);
       return {
         beta,
         lambda,
-        basis
+        basis: this._resolveEndomorphismBasis(conf, lambda)
       };
+    }
+    _resolveEndomorphismBeta(conf) {
+      if (conf.beta !== void 0)
+        return new BigNumber(conf.beta, 16).toRed(this.red);
+      const betas = this._getEndoRoots(this.p);
+      if (betas == null)
+        throw new Error("Failed to get endomorphism roots for beta.");
+      const beta = betas[0].cmp(betas[1]) < 0 ? betas[0] : betas[1];
+      return beta.toRed(this.red);
+    }
+    _endomorphismLambdaMatches(lambda, beta, requireCoordinates = false) {
+      if (this.g == null)
+        throw new Error("Curve generator point (g) is not defined.");
+      const gMulX = this.g.mul(lambda)?.x;
+      const gXRedMulBeta = this.g.x == null ? void 0 : this.g.x.redMul(beta);
+      if (gMulX == null || gXRedMulBeta == null) {
+        if (requireCoordinates) {
+          throw new Error("Lambda computation failed: g.mul(lambda).x or g.x.redMul(beta) is undefined.");
+        }
+        return false;
+      }
+      return gMulX.cmp(gXRedMulBeta) === 0;
+    }
+    _resolveEndomorphismLambda(conf, beta) {
+      if (conf.lambda !== void 0)
+        return new BigNumber(conf.lambda, 16);
+      const lambdas = this._getEndoRoots(this.n);
+      if (lambdas == null)
+        throw new Error("Failed to get endomorphism roots for lambda.");
+      if (this._endomorphismLambdaMatches(lambdas[0], beta))
+        return lambdas[0];
+      _Curve.assert(this._endomorphismLambdaMatches(lambdas[1], beta, true), "Lambda selection does not match computed beta.");
+      return lambdas[1];
+    }
+    _resolveEndomorphismBasis(conf, lambda) {
+      if (typeof conf.basis !== "object" || conf.basis === null) {
+        return this._getEndoBasis(lambda);
+      }
+      return conf.basis.map((vec) => ({
+        a: new BigNumber(vec.a, 16),
+        b: new BigNumber(vec.b, 16)
+      }));
     }
     _getEndoRoots(num) {
       const red2 = num === this.p ? this.red : new MontgomoryMethod(num);
@@ -7710,537 +6463,1444 @@
     }
   };
 
-  // node_modules/@bsv/sdk/dist/esm/src/primitives/ECDSA.js
-  var ECDSA_exports = {};
-  __export(ECDSA_exports, {
-    sign: () => sign,
-    verify: () => verify
-  });
+  // node_modules/@bsv/sdk/dist/esm/src/primitives/BasePoint.js
+  var BasePoint = class {
+    curve;
+    type;
+    precomputed;
+    constructor(type) {
+      this.curve = new Curve();
+      this.type = type;
+      this.precomputed = null;
+    }
+  };
 
-  // node_modules/@bsv/sdk/dist/esm/src/primitives/Signature.js
-  var Signature = class _Signature {
+  // node_modules/@bsv/sdk/dist/esm/src/primitives/JacobianPoint.js
+  var JacobianPoint = class _JacobianPoint extends BasePoint {
+    x;
+    y;
+    z;
+    zOne;
     /**
-     * @property Represents the "r" component of the digital signature
-     */
-    r;
-    /**
-     * @property Represents the "s" component of the digital signature
-     */
-    s;
-    /**
-     * Takes an array of numbers or a string and returns a new Signature instance.
-     * This method will throw an error if the DER encoding is invalid.
-     * If a string is provided, it is assumed to represent a hexadecimal sequence.
+     * Constructs a new `JacobianPoint` instance.
      *
-     * @static
+     * @param x - If `null`, the x-coordinate will default to the curve's defined 'one' constant.
+     * If `x` is not a BigNumber, `x` will be converted to a `BigNumber` assuming it is a hex string.
+     *
+     * @param y - If `null`, the y-coordinate will default to the curve's defined 'one' constant.
+     * If `y` is not a BigNumber, `y` will be converted to a `BigNumber` assuming it is a hex string.
+     *
+     * @param z - If `null`, the z-coordinate will default to 0.
+     * If `z` is not a BigNumber, `z` will be converted to a `BigNumber` assuming it is a hex string.
+     *
+     * @example
+     * const pointJ1 = new JacobianPoint(null, null, null); // creates point at infinity
+     * const pointJ2 = new JacobianPoint('3', '4', '1'); // creates point (3, 4, 1)
+     */
+    constructor(x, y, z) {
+      super("jacobian");
+      if (x === null && y === null && z === null) {
+        this.x = this.curve.one;
+        this.y = this.curve.one;
+        this.z = new BigNumber(0);
+      } else {
+        if (!BigNumber.isBN(x)) {
+          x = new BigNumber(x, 16);
+        }
+        this.x = x;
+        if (!BigNumber.isBN(y)) {
+          y = new BigNumber(y, 16);
+        }
+        this.y = y;
+        if (!BigNumber.isBN(z)) {
+          z = new BigNumber(z, 16);
+        }
+        this.z = z;
+      }
+      if (this.x.red == null) {
+        this.x = this.x.toRed(this.curve.red);
+      }
+      if (this.y.red == null) {
+        this.y = this.y.toRed(this.curve.red);
+      }
+      if (this.z.red == null) {
+        this.z = this.z.toRed(this.curve.red);
+      }
+      this.zOne = this.z === this.curve.one;
+      if (this.isInfinity()) {
+        this.x = this.curve.one;
+        this.y = this.curve.one;
+        this.z = new BigNumber(0).toRed(this.curve.red);
+        this.zOne = false;
+      }
+    }
+    /**
+     * Converts the `JacobianPoint` object instance to standard affine `Point` format and returns `Point` type.
+     *
+     * @returns The `Point`(affine) object representing the same point as the original `JacobianPoint`.
+     *
+     * If the initial `JacobianPoint` represents point at infinity, an instance of `Point` at infinity is returned.
+     *
+     * @example
+     * const pointJ = new JacobianPoint('3', '4', '1');
+     * const pointP = pointJ.toP();  // The point in affine coordinates.
+     */
+    toP() {
+      if (this.isInfinity()) {
+        return new Point(null, null);
+      }
+      const zinv = this.z.redInvm();
+      const zinv2 = zinv.redSqr();
+      const ax = this.x.redMul(zinv2);
+      const ay = this.y.redMul(zinv2).redMul(zinv);
+      return new Point(ax, ay);
+    }
+    /**
+     * Negation operation. It returns the additive inverse of the Jacobian point.
+     *
+     * @method neg
+     * @returns Returns a new Jacobian point as the result of the negation.
+     *
+     * @example
+     * const jp = new JacobianPoint(x, y, z)
+     * const result = jp.neg()
+     */
+    neg() {
+      return new _JacobianPoint(this.x, this.y.redNeg(), this.z);
+    }
+    /**
+     * Addition operation in the Jacobian coordinates. It takes a Jacobian point as an argument
+     * and returns a new Jacobian point as a result of the addition. In the special cases,
+     * when either one of the points is the point at infinity, it will return the other point.
+     *
+     * @method add
+     * @param p - The Jacobian point to be added.
+     * @returns Returns a new Jacobian point as the result of the addition.
+     *
+     * @example
+     * const p1 = new JacobianPoint(x1, y1, z1)
+     * const p2 = new JacobianPoint(x2, y2, z2)
+     * const result = p1.add(p2)
+     */
+    add(p) {
+      if (this.isInfinity()) {
+        return p;
+      }
+      if (p.isInfinity()) {
+        return this;
+      }
+      const pz2 = p.z.redSqr();
+      const z2 = this.z.redSqr();
+      const u1 = this.x.redMul(pz2);
+      const u2 = p.x.redMul(z2);
+      const s1 = this.y.redMul(pz2.redMul(p.z));
+      const s2 = p.y.redMul(z2.redMul(this.z));
+      const h = u1.redSub(u2);
+      const r2 = s1.redSub(s2);
+      if (h.cmpn(0) === 0) {
+        if (r2.cmpn(0) === 0) {
+          return this.dbl();
+        } else {
+          return new _JacobianPoint(null, null, null);
+        }
+      }
+      const h2 = h.redSqr();
+      const h3 = h2.redMul(h);
+      const v = u1.redMul(h2);
+      const nx = r2.redSqr().redIAdd(h3).redISub(v).redISub(v);
+      const ny = r2.redMul(v.redISub(nx)).redISub(s1.redMul(h3));
+      const nz = this.z.redMul(p.z).redMul(h);
+      return new _JacobianPoint(nx, ny, nz);
+    }
+    /**
+     * Mixed addition operation. This function combines the standard point addition with
+     * the transformation from the affine to Jacobian coordinates. It first converts
+     * the affine point to Jacobian, and then preforms the addition.
+     *
+     * @method mixedAdd
+     * @param p - The affine point to be added.
+     * @returns Returns the result of the mixed addition as a new Jacobian point.
+     *
+     * @example
+     * const jp = new JacobianPoint(x1, y1, z1)
+     * const ap = new Point(x2, y2)
+     * const result = jp.mixedAdd(ap)
+     */
+    mixedAdd(p) {
+      if (this.isInfinity()) {
+        return p.toJ();
+      }
+      if (p.isInfinity()) {
+        return this;
+      }
+      if (p.x === null || p.y === null) {
+        throw new Error("Point coordinates cannot be null");
+      }
+      const z2 = this.z.redSqr();
+      const u1 = this.x;
+      const u2 = p.x.redMul(z2);
+      const s1 = this.y;
+      const s2 = p.y.redMul(z2).redMul(this.z);
+      const h = u1.redSub(u2);
+      const r2 = s1.redSub(s2);
+      if (h.cmpn(0) === 0) {
+        if (r2.cmpn(0) === 0) {
+          return this.dbl();
+        } else {
+          return new _JacobianPoint(null, null, null);
+        }
+      }
+      const h2 = h.redSqr();
+      const h3 = h2.redMul(h);
+      const v = u1.redMul(h2);
+      const nx = r2.redSqr().redIAdd(h3).redISub(v).redISub(v);
+      const ny = r2.redMul(v.redISub(nx)).redISub(s1.redMul(h3));
+      const nz = this.z.redMul(h);
+      return new _JacobianPoint(nx, ny, nz);
+    }
+    /**
+     * Multiple doubling operation. It doubles the Jacobian point as many times as the pow parameter specifies. If pow is 0 or the point is the point at infinity, it will return the point itself.
+     *
+     * @method dblp
+     * @param pow - The number of times the point should be doubled.
+     * @returns Returns a new Jacobian point as the result of multiple doublings.
+     *
+     * @example
+     * const jp = new JacobianPoint(x, y, z)
+     * const result = jp.dblp(3)
+     */
+    dblp(pow) {
+      if (pow === 0) {
+        return this;
+      }
+      if (this.isInfinity()) {
+        return this;
+      }
+      if (pow === void 0) {
+        return this.dbl();
+      }
+      let r2 = this;
+      for (let i = 0; i < pow; i++) {
+        r2 = r2.dbl();
+      }
+      return r2;
+    }
+    /**
+     * Point doubling operation in the Jacobian coordinates. A special case is when the point is the point at infinity, in this case, this function will return the point itself.
+     *
+     * @method dbl
+     * @returns Returns a new Jacobian point as the result of the doubling.
+     *
+     * @example
+     * const jp = new JacobianPoint(x, y, z)
+     * const result = jp.dbl()
+     */
+    dbl() {
+      if (this.isInfinity()) {
+        return this;
+      }
+      let nx;
+      let ny;
+      let nz;
+      if (this.zOne) {
+        const xx = this.x.redSqr();
+        const yy = this.y.redSqr();
+        const yyyy = yy.redSqr();
+        let s2 = this.x.redAdd(yy).redSqr().redISub(xx).redISub(yyyy);
+        s2 = s2.redIAdd(s2);
+        const m = xx.redAdd(xx).redIAdd(xx);
+        const t = m.redSqr().redISub(s2).redISub(s2);
+        let yyyy8 = yyyy.redIAdd(yyyy);
+        yyyy8 = yyyy8.redIAdd(yyyy8);
+        yyyy8 = yyyy8.redIAdd(yyyy8);
+        nx = t;
+        ny = m.redMul(s2.redISub(t)).redISub(yyyy8);
+        nz = this.y.redAdd(this.y);
+      } else {
+        const a = this.x.redSqr();
+        const b = this.y.redSqr();
+        const c = b.redSqr();
+        let d = this.x.redAdd(b).redSqr().redISub(a).redISub(c);
+        d = d.redIAdd(d);
+        const e = a.redAdd(a).redIAdd(a);
+        const f2 = e.redSqr();
+        let c8 = c.redIAdd(c);
+        c8 = c8.redIAdd(c8);
+        c8 = c8.redIAdd(c8);
+        nx = f2.redISub(d).redISub(d);
+        ny = e.redMul(d.redISub(nx)).redISub(c8);
+        nz = this.y.redMul(this.z);
+        nz = nz.redIAdd(nz);
+      }
+      return new _JacobianPoint(nx, ny, nz);
+    }
+    /**
+     * Equality check operation. It checks whether the affine or Jacobian point is equal to this Jacobian point.
+     *
+     * @method eq
+     * @param p - The affine or Jacobian point to compare with.
+     * @returns Returns true if the points are equal, otherwise returns false.
+     *
+     * @example
+     * const jp1 = new JacobianPoint(x1, y1, z1)
+     * const jp2 = new JacobianPoint(x2, y2, z2)
+     * const areEqual = jp1.eq(jp2)
+     */
+    eq(p) {
+      if (p.type === "affine") {
+        return this.eq(p.toJ());
+      }
+      if (this === p) {
+        return true;
+      }
+      p = p;
+      if (this.isInfinity() && p.isInfinity()) {
+        return true;
+      }
+      if (this.isInfinity() !== p.isInfinity()) {
+        return false;
+      }
+      const z2 = this.z.redSqr();
+      const pz2 = p.z.redSqr();
+      if (this.x.redMul(pz2).redISub(p.x.redMul(z2)).cmpn(0) !== 0) {
+        return false;
+      }
+      const z3 = z2.redMul(this.z);
+      const pz3 = pz2.redMul(p.z);
+      return this.y.redMul(pz3).redISub(p.y.redMul(z3)).cmpn(0) === 0;
+    }
+    /**
+     * Equality check operation in relation to an x coordinate of a point in projective coordinates.
+     * It checks whether the x coordinate of the Jacobian point is equal to the provided x coordinate
+     * of a point in projective coordinates.
+     *
+     * @method eqXToP
+     * @param x - The x coordinate of a point in projective coordinates.
+     * @returns Returns true if the x coordinates are equal, otherwise returns false.
+     *
+     * @example
+     * const jp = new JacobianPoint(x1, y1, z1)
+     * const isXEqual = jp.eqXToP(x2)
+     */
+    eqXToP(x) {
+      const zs = this.z.redSqr();
+      const rx = x.toRed(this.curve?.red).redMul(zs);
+      if (this.x.cmp(rx) === 0) {
+        return true;
+      }
+      const xc = x.clone();
+      if (this.curve?.redN == null) {
+        throw new Error("Curve or redN is not initialized.");
+      }
+      const t = this.curve.redN.redMul(zs);
+      while (xc.cmp(this.curve.p) < 0) {
+        xc.iadd(this.curve.n);
+        if (xc.cmp(this.curve.p) >= 0) {
+          return false;
+        }
+        rx.redIAdd(t);
+        if (this.x.cmp(rx) === 0) {
+          return true;
+        }
+      }
+      return false;
+    }
+    /**
+     * Returns the string representation of the JacobianPoint instance.
+     * @method inspect
+     * @returns Returns the string description of the JacobianPoint. If the JacobianPoint represents a point at infinity, the return value of this function is '<EC JPoint Infinity>'. For a normal point, it returns the string description format as '<EC JPoint x: x-coordinate y: y-coordinate z: z-coordinate>'.
+     *
+     * @example
+     * const point = new JacobianPoint('5', '6', '1');
+     * console.log(point.inspect()); // Output: '<EC JPoint x: 5 y: 6 z: 1>'
+     */
+    inspect() {
+      if (this.isInfinity()) {
+        return "<EC JPoint Infinity>";
+      }
+      return "<EC JPoint x: " + this.x.toString(16, 2) + " y: " + this.y.toString(16, 2) + " z: " + this.z.toString(16, 2) + ">";
+    }
+    /**
+     * Checks whether the JacobianPoint instance represents a point at infinity.
+     * @method isInfinity
+     * @returns Returns true if the JacobianPoint's z-coordinate equals to zero (which represents the point at infinity in Jacobian coordinates). Returns false otherwise.
+     *
+     * @example
+     * const point = new JacobianPoint('5', '6', '0');
+     * console.log(point.isInfinity()); // Output: true
+     */
+    isInfinity() {
+      return this.z.cmpn(0) === 0;
+    }
+  };
+
+  // node_modules/@bsv/sdk/dist/esm/src/primitives/Point.js
+  function ctSwap(swap, a, b) {
+    const mask = -swap;
+    const swapX = (a.X ^ b.X) & mask;
+    const swapY = (a.Y ^ b.Y) & mask;
+    const swapZ = (a.Z ^ b.Z) & mask;
+    a.X ^= swapX;
+    b.X ^= swapX;
+    a.Y ^= swapY;
+    b.Y ^= swapY;
+    a.Z ^= swapZ;
+    b.Z ^= swapZ;
+  }
+  var BI_ZERO = 0n;
+  var BI_ONE = 1n;
+  var BI_TWO = 2n;
+  var BI_THREE = 3n;
+  var BI_FOUR = 4n;
+  var BI_EIGHT = 8n;
+  var P_BIGINT = 0xfffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2fn;
+  var N_BIGINT = 0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141n;
+  var MASK_256 = (1n << 256n) - 1n;
+  function red(x) {
+    let hi = x >> 256n;
+    x = (x & MASK_256) + (hi << 32n) + hi * 977n;
+    hi = x >> 256n;
+    x = (x & MASK_256) + (hi << 32n) + hi * 977n;
+    if (x >= P_BIGINT)
+      x -= P_BIGINT;
+    return x;
+  }
+  var biMod = (a) => red((a % P_BIGINT + P_BIGINT) % P_BIGINT);
+  var biModSub = (a, b) => a >= b ? a - b : P_BIGINT - (b - a);
+  var biModMul = (a, b) => red(a * b);
+  var biModAdd = (a, b) => red(a + b);
+  var biModInv = (a) => {
+    let lm = BI_ONE;
+    let hm = BI_ZERO;
+    let low = biMod(a);
+    let high = P_BIGINT;
+    while (low > BI_ONE) {
+      const r2 = high / low;
+      [lm, hm] = [hm - lm * r2, lm];
+      [low, high] = [high - low * r2, low];
+    }
+    return biMod(lm);
+  };
+  var biModSqr = (a) => biModMul(a, a);
+  var biModPow = (base, exp) => {
+    let result = 1n;
+    base = biMod(base);
+    while (exp > 0n) {
+      if ((exp & 1n) !== 0n) {
+        result = biModMul(result, base);
+      }
+      base = biModMul(base, base);
+      exp >>= 1n;
+    }
+    return result;
+  };
+  var P_PLUS1_DIV4 = P_BIGINT + 1n >> 2n;
+  var biModSqrt = (a) => {
+    const r2 = biModPow(a, P_PLUS1_DIV4);
+    if (biModMul(r2, r2) !== biMod(a)) {
+      return null;
+    }
+    return r2;
+  };
+  var toBigInt = (x) => {
+    if (BigNumber.isBN(x))
+      return BigInt("0x" + x.toString(16));
+    if (typeof x === "string")
+      return BigInt("0x" + x);
+    if (Array.isArray(x))
+      return BigInt("0x" + toHex(x));
+    return BigInt(x);
+  };
+  var GX_BIGINT = BigInt("0x79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798");
+  var GY_BIGINT = BigInt("0x483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8");
+  var WNAF_TABLE_CACHE = /* @__PURE__ */ new Map();
+  var jpDouble = (P) => {
+    const { X: X1, Y: Y1, Z: Z1 } = P;
+    if (Y1 === BI_ZERO)
+      return { X: BI_ZERO, Y: BI_ONE, Z: BI_ZERO };
+    const Y1sq = biModMul(Y1, Y1);
+    const S = biModMul(BI_FOUR, biModMul(X1, Y1sq));
+    const M = biModMul(BI_THREE, biModMul(X1, X1));
+    const X3 = biModSub(biModMul(M, M), biModMul(BI_TWO, S));
+    const Y3 = biModSub(biModMul(M, biModSub(S, X3)), biModMul(BI_EIGHT, biModMul(Y1sq, Y1sq)));
+    const Z3 = biModMul(BI_TWO, biModMul(Y1, Z1));
+    return { X: X3, Y: Y3, Z: Z3 };
+  };
+  var jpAdd = (P, Q) => {
+    if (P.Z === BI_ZERO)
+      return Q;
+    if (Q.Z === BI_ZERO)
+      return P;
+    const Z1Z1 = biModMul(P.Z, P.Z);
+    const Z2Z2 = biModMul(Q.Z, Q.Z);
+    const U1 = biModMul(P.X, Z2Z2);
+    const U2 = biModMul(Q.X, Z1Z1);
+    const S1 = biModMul(P.Y, biModMul(Z2Z2, Q.Z));
+    const S2 = biModMul(Q.Y, biModMul(Z1Z1, P.Z));
+    const H = biModSub(U2, U1);
+    const r2 = biModSub(S2, S1);
+    if (H === BI_ZERO) {
+      if (r2 === BI_ZERO)
+        return jpDouble(P);
+      return { X: BI_ZERO, Y: BI_ONE, Z: BI_ZERO };
+    }
+    const HH = biModMul(H, H);
+    const HHH = biModMul(H, HH);
+    const V = biModMul(U1, HH);
+    const X3 = biModSub(biModSub(biModMul(r2, r2), HHH), biModMul(BI_TWO, V));
+    const Y3 = biModSub(biModMul(r2, biModSub(V, X3)), biModMul(S1, HHH));
+    const Z3 = biModMul(H, biModMul(P.Z, Q.Z));
+    return { X: X3, Y: Y3, Z: Z3 };
+  };
+  var jpNeg = (P) => {
+    if (P.Z === BI_ZERO)
+      return P;
+    return { X: P.X, Y: P_BIGINT - P.Y, Z: P.Z };
+  };
+  var wnafTable = (window2, P0) => {
+    const key = `${window2}:${P0.x.toString(16)}:${P0.y.toString(16)}`;
+    const cached = WNAF_TABLE_CACHE.get(key);
+    if (cached !== void 0)
+      return cached;
+    const table = Array.from({ length: 1 << window2 - 1 }, () => ({
+      X: BI_ZERO,
+      Y: BI_ONE,
+      Z: BI_ZERO
+    }));
+    const point = { X: P0.x, Y: P0.y, Z: BI_ONE };
+    table[0] = point;
+    const doubled = jpDouble(point);
+    for (let i = 1; i < table.length; i++) {
+      table[i] = jpAdd(table[i - 1], doubled);
+    }
+    WNAF_TABLE_CACHE.set(key, table);
+    return table;
+  };
+  var wnafDigits = (scalar, window2) => {
+    const digits = [];
+    const windowSize = 1n << BigInt(window2);
+    const halfWindow = windowSize >> 1n;
+    let remaining = scalar;
+    while (remaining > 0n) {
+      if ((remaining & BI_ONE) === BI_ZERO) {
+        digits.push(0);
+      } else {
+        let digit = remaining & windowSize - 1n;
+        if (digit > halfWindow)
+          digit -= windowSize;
+        digits.push(Number(digit));
+        remaining -= digit;
+      }
+      remaining >>= BI_ONE;
+    }
+    return digits;
+  };
+  var scalarMultiplyWNAF = (k, P0, window2 = 5) => {
+    const table = wnafTable(window2, P0);
+    const wnaf = wnafDigits(k, window2);
+    let Q = { X: BI_ZERO, Y: BI_ONE, Z: BI_ZERO };
+    for (let i = wnaf.length - 1; i >= 0; i--) {
+      Q = jpDouble(Q);
+      const di = wnaf[i];
+      if (di !== 0) {
+        const idx = Math.abs(di) >> 1;
+        const addend = di > 0 ? table[idx] : jpNeg(table[idx]);
+        Q = jpAdd(Q, addend);
+      }
+    }
+    return Q;
+  };
+  var modN = (a) => {
+    let r2 = a % N_BIGINT;
+    if (r2 < 0n)
+      r2 += N_BIGINT;
+    return r2;
+  };
+  var modMulN = (a, b) => modN(a * b);
+  var modInvN = (a) => {
+    let lm = 1n;
+    let hm = 0n;
+    let low = modN(a);
+    let high = N_BIGINT;
+    while (low > 1n) {
+      const q = high / low;
+      [lm, hm] = [hm - lm * q, lm];
+      [low, high] = [high - low * q, low];
+    }
+    return modN(lm);
+  };
+  var Point = class _Point extends BasePoint {
+    x;
+    y;
+    inf;
+    static _assertOnCurve(p) {
+      if (!p.validate()) {
+        throw new Error("Invalid point");
+      }
+      return p;
+    }
+    /**
+     * Creates a point object from a given Array. These numbers can represent coordinates in hex format, or points
+     * in multiple established formats.
+     * The function verifies the integrity of the provided data and throws errors if inconsistencies are found.
+     *
      * @method fromDER
-     * @param data - The sequence to decode from DER encoding.
-     * @param enc - The encoding of the data string.
-     * @returns The decoded data in the form of Signature instance.
-     *
-     * @example
-     * const signature = Signature.fromDER('30440220018c1f5502f8...', 'hex');
-     */
-    static fromDER(data, enc) {
-      const getLength = (buf, p2) => {
-        const initial = buf[p2.place++];
-        if ((initial & 128) === 0) {
-          return initial;
-        } else {
-          throw new Error("Invalid DER entity length");
-        }
-      };
-      class Position {
-        place;
-        constructor() {
-          this.place = 0;
-        }
-      }
-      data = toArray2(data, enc);
-      const p = new Position();
-      if (data[p.place++] !== 48) {
-        throw new Error("Signature DER must start with 0x30");
-      }
-      const len = getLength(data, p);
-      if (len + p.place !== data.length) {
-        throw new Error("Signature DER invalid");
-      }
-      if (data[p.place++] !== 2) {
-        throw new Error("Signature DER invalid");
-      }
-      const rlen = getLength(data, p);
-      let r2 = data.slice(p.place, rlen + p.place);
-      p.place += rlen;
-      if (data[p.place++] !== 2) {
-        throw new Error("Signature DER invalid");
-      }
-      const slen = getLength(data, p);
-      if (data.length !== slen + p.place) {
-        throw new Error("Invalid R-length in signature DER");
-      }
-      let s2 = data.slice(p.place, slen + p.place);
-      if (r2[0] === 0) {
-        if ((r2[1] & 128) !== 0) {
-          r2 = r2.slice(1);
-        } else {
-          throw new Error("Invalid R-value in signature DER");
-        }
-      }
-      if (s2[0] === 0) {
-        if ((s2[1] & 128) !== 0) {
-          s2 = s2.slice(1);
-        } else {
-          throw new Error("Invalid S-value in signature DER");
-        }
-      }
-      return new _Signature(new BigNumber(r2), new BigNumber(s2));
-    }
-    /**
-     * Takes an array of numbers or a string and returns a new Signature instance.
-     * This method will throw an error if the Compact encoding is invalid.
-     * If a string is provided, it is assumed to represent a hexadecimal sequence.
-     * compactByte value 27-30 means uncompressed public key.
-     * 31-34 means compressed public key.
-     * The range represents the recovery param which can be 0,1,2,3.
-     * We could support recovery functions in future if there's demand.
-     *
      * @static
-     * @method fromCompact
-     * @param data - The sequence to decode from Compact encoding.
-     * @param enc - The encoding of the data string.
-     * @returns The decoded data in the form of Signature instance.
+     * @param bytes - The point representation number array.
+     * @returns Returns a new point representing the given string.
+     * @throws `Error` If the point number[] value has a wrong length.
+     * @throws `Error` If the point format is unknown.
      *
      * @example
-     * const signature = Signature.fromCompact('1b18c1f5502f8...', 'hex');
+     * const derPoint = [ 2, 18, 123, 108, 125, 83, 1, 251, 164, 214, 16, 119, 200, 216, 210, 193, 251, 193, 129, 67, 97, 146, 210, 216, 77, 254, 18, 6, 150, 190, 99, 198, 128 ];
+     * const point = Point.fromDER(derPoint);
      */
-    static fromCompact(data, enc) {
-      data = toArray2(data, enc);
-      if (data.length !== 65) {
-        throw new Error("Invalid Compact Signature");
+    static fromDER(bytes2) {
+      const len = 32;
+      if ((bytes2[0] === 4 || bytes2[0] === 6 || bytes2[0] === 7) && bytes2.length - 1 === 2 * len) {
+        if (bytes2[0] === 6) {
+          if (bytes2.at(-1) % 2 !== 0) {
+            throw new Error("Point string value is wrong length");
+          }
+        } else if (bytes2[0] === 7) {
+          if (bytes2.at(-1) % 2 !== 1) {
+            throw new Error("Point string value is wrong length");
+          }
+        }
+        const res = new _Point(bytes2.slice(1, 1 + len), bytes2.slice(1 + len, 1 + 2 * len));
+        return _Point._assertOnCurve(res);
+      } else if ((bytes2[0] === 2 || bytes2[0] === 3) && bytes2.length - 1 === len) {
+        return _Point._assertOnCurve(_Point.fromX(bytes2.slice(1, 1 + len), bytes2[0] === 3));
       }
-      const compactByte = data[0];
-      if (compactByte < 27 || compactByte >= 35) {
-        throw new Error("Invalid Compact Byte");
-      }
-      return new _Signature(new BigNumber(data.slice(1, 33)), new BigNumber(data.slice(33, 65)));
+      throw new Error("Unknown point format");
     }
     /**
-     * Creates an instance of the Signature class.
+     * Creates a point object from a given string. This string can represent coordinates in hex format, or points
+     * in multiple established formats.
+     * The function verifies the integrity of the provided data and throws errors if inconsistencies are found.
      *
+     * @method fromString
+     * @static
+     *
+     * @param str The point representation string.
+     * @returns Returns a new point representing the given string.
+     * @throws `Error` If the point string value has a wrong length.
+     * @throws `Error` If the point format is unknown.
+     *
+     * @example
+     * const pointStr = 'abcdef';
+     * const point = Point.fromString(pointStr);
+     */
+    static fromString(str) {
+      const bytes2 = toArray2(str, "hex");
+      return _Point._assertOnCurve(_Point.fromDER(bytes2));
+    }
+    /**
+     * Generates a point from an x coordinate and a boolean indicating whether the corresponding
+     * y coordinate is odd.
+     *
+     * @method fromX
+     * @static
+     * @param x - The x coordinate of the point.
+     * @param odd - Boolean indicating whether the corresponding y coordinate is odd or not.
+     * @returns Returns the new point.
+     * @throws `Error` If the point is invalid.
+     *
+     * @example
+     * const xCoordinate = new BigNumber('10');
+     * const point = Point.fromX(xCoordinate, true);
+     */
+    static fromX(x, odd) {
+      let xBigInt = toBigInt(x);
+      xBigInt = biMod(xBigInt);
+      const y2 = biModAdd(biModMul(biModSqr(xBigInt), xBigInt), 7n);
+      const y = biModSqrt(y2);
+      if (y === null) {
+        throw new Error("Invalid point");
+      }
+      let yBig = y;
+      if ((yBig & BI_ONE) !== (odd ? BI_ONE : BI_ZERO)) {
+        yBig = biModSub(P_BIGINT, yBig);
+      }
+      const xBN = new BigNumber(xBigInt.toString(16), 16);
+      const yBN = new BigNumber(yBig.toString(16), 16);
+      return _Point._assertOnCurve(new _Point(xBN, yBN));
+    }
+    /**
+     * Generates a point from a serialized JSON object. The function accounts for different options in the JSON object,
+     * including precomputed values for optimization of EC operations, and calls another helper function to turn nested
+     * JSON points into proper Point objects.
+     *
+     * @method fromJSON
+     * @static
+     * @param obj - An object or array that holds the data for the point.
+     * @param isRed - A boolean to direct how the Point is constructed from the JSON object.
+     * @returns Returns a new point based on the deserialized JSON object.
+     *
+     * @example
+     * const serializedPoint = '{"x":52,"y":15}';
+     * const point = Point.fromJSON(serializedPoint, true);
+     */
+    static fromJSON(obj, isRed) {
+      if (typeof obj === "string") {
+        obj = JSON.parse(obj);
+      }
+      let res = new _Point(obj[0], obj[1], isRed);
+      res = _Point._assertOnCurve(res);
+      if (typeof obj[2] !== "object" || obj[2] === null) {
+        return res;
+      }
+      const pre = obj[2];
+      const obj2point = (p) => {
+        const pt = new _Point(p[0], p[1], isRed);
+        return _Point._assertOnCurve(pt);
+      };
+      res.precomputed = {
+        beta: null,
+        doubles: typeof pre.doubles === "object" && pre.doubles !== null ? {
+          step: pre.doubles.step,
+          points: [res].concat(pre.doubles.points.map(obj2point))
+        } : void 0,
+        naf: typeof pre.naf === "object" && pre.naf !== null ? {
+          wnd: pre.naf.wnd,
+          points: [res].concat(pre.naf.points.map(obj2point))
+        } : void 0
+      };
+      return res;
+    }
+    /**
      * @constructor
-     * @param r - The R component of the signature.
-     * @param s - The S component of the signature.
+     * @param x - The x-coordinate of the point. May be a number, a BigNumber, a string (which will be interpreted as hex), a number array, or null. If null, an "Infinity" point is constructed.
+     * @param y - The y-coordinate of the point, similar to x.
+     * @param isRed - A boolean indicating if the point is a member of the field of integers modulo the k256 prime. Default is true.
      *
      * @example
-     * const r = new BigNumber('208755674028...');
-     * const s = new BigNumber('564745627577...');
-     * const signature = new Signature(r, s);
+     * new Point('abc123', 'def456');
+     * new Point(null, null); // Generates Infinity point.
      */
-    constructor(r2, s2) {
-      this.r = r2;
-      this.s = s2;
+    constructor(x, y, isRed = true) {
+      super("affine");
+      this.precomputed = null;
+      if (x === null && y === null) {
+        this.x = null;
+        this.y = null;
+        this.inf = true;
+      } else {
+        if (!BigNumber.isBN(x)) {
+          x = new BigNumber(x, 16);
+        }
+        this.x = x;
+        if (!BigNumber.isBN(y)) {
+          y = new BigNumber(y, 16);
+        }
+        this.y = y;
+        if (isRed) {
+          this.x.forceRed(this.curve.red);
+          this.y.forceRed(this.curve.red);
+        }
+        if (this.x.red === null) {
+          this.x = this.x.toRed(this.curve.red);
+        }
+        if (this.y.red === null) {
+          this.y = this.y.toRed(this.curve.red);
+        }
+        this.inf = false;
+      }
     }
     /**
-     * Verifies a digital signature.
+     * Validates if a point belongs to the curve. Follows the short Weierstrass
+     * equation for elliptic curves: y^2 = x^3 + ax + b.
      *
-     * This method will return true if the signature, key, and message hash match.
-     * If the data or key do not match the signature, the function returns false.
-     *
-     * @method verify
-     * @param msg - The message to verify.
-     * @param key - The public key used to sign the original message.
-     * @param enc - The encoding of the msg string.
-     * @returns A boolean representing whether the signature is valid.
+     * @method validate
+     * @returns {boolean} true if the point is on the curve, false otherwise.
      *
      * @example
-     * const msg = 'The quick brown fox jumps over the lazy dog';
-     * const publicKey = PublicKey.fromString('04188ca1050...');
-     * const isVerified = signature.verify(msg, publicKey);
+     * const aPoint = new Point(x, y);
+     * const isValid = aPoint.validate();
      */
-    verify(msg, key, enc) {
-      const msgHash = new BigNumber(sha256(msg, enc), 16);
-      return verify(msgHash, this, key);
+    validate() {
+      if (this.inf || this.x == null || this.y == null)
+        return false;
+      try {
+        const xBig = BigInt("0x" + this.x.fromRed().toString(16));
+        const yBig = BigInt("0x" + this.y.fromRed().toString(16));
+        const lhs = biModMul(yBig, yBig);
+        const rhs = biModAdd(biModMul(biModMul(xBig, xBig), xBig), 7n);
+        return lhs === rhs;
+      } catch {
+        return false;
+      }
     }
     /**
-     * Converts an instance of Signature into DER encoding.
-     * An alias for the toDER method.
+     * Encodes the coordinates of a point into an array or a hexadecimal string.
+     * The details of encoding are determined by the optional compact and enc parameters.
      *
-     * If the encoding parameter is set to 'hex', the function will return a hex string.
-     * If 'base64', it will return a base64 string.
-     * Otherwise, it will return an array of numbers.
-     *
-     * @method toDER
-     * @param enc - The encoding to use for the output.
-     * @returns The current instance in DER encoding.
+     * @method encode
+     * @param compact - If true, an additional prefix byte 0x02 or 0x03 based on the 'y' coordinate being even or odd respectively is used. If false, byte 0x04 is used.
+     * @param enc - Expects the string 'hex' if hexadecimal string encoding is required instead of an array of numbers.
+     * @throws Will throw an error if the specified encoding method is not recognized. Expects 'hex'.
+     * @returns If enc is undefined, a byte array representation of the point will be returned. if enc is 'hex', a hexadecimal string representation of the point will be returned.
      *
      * @example
-     * const der = signature.toString('base64');
+     * const aPoint = new Point(x, y);
+     * const encodedPointArray = aPoint.encode();
+     * const encodedPointHex = aPoint.encode(true, 'hex');
      */
-    toString(enc) {
-      return this.toDER(enc);
-    }
-    /**
-     * Converts an instance of Signature into DER encoding.
-     *
-     * If the encoding parameter is set to 'hex', the function will return a hex string.
-     * If 'base64', it will return a base64 string.
-     * Otherwise, it will return an array of numbers.
-     *
-     * @method toDER
-     * @param enc - The encoding to use for the output.
-     * @returns The current instance in DER encoding.
-     *
-     * @example
-     * const der = signature.toDER('hex');
-     */
-    toDER(enc) {
-      const constructLength = (arr2, len) => {
-        if (len < 128) {
-          arr2.push(len);
-        } else {
-          throw new Error("len must be < 0x80");
-        }
-      };
-      const rmPadding = (buf) => {
-        let i = 0;
-        const len = buf.length - 1;
-        while (buf[i] === 0 && (buf[i + 1] & 128) === 0 && i < len) {
-          i++;
-        }
-        if (i === 0) {
-          return buf;
-        }
-        return buf.slice(i);
-      };
-      let r2 = this.r.toArray();
-      let s2 = this.s.toArray();
-      if ((r2[0] & 128) !== 0) {
-        r2 = [0].concat(r2);
+    encode(compact = true, enc) {
+      if (this.inf) {
+        if (enc === "hex")
+          return "00";
+        return [0];
       }
-      if ((s2[0] & 128) !== 0) {
-        s2 = [0].concat(s2);
+      const len = this.curve.p.byteLength();
+      const x = this.getX().toArray("be", len);
+      let res;
+      if (compact) {
+        res = [this.getY().isEven() ? 2 : 3].concat(x);
+      } else {
+        res = [4].concat(x, this.getY().toArray("be", len));
       }
-      r2 = rmPadding(r2);
-      s2 = rmPadding(s2);
-      while (s2[0] === 0 && (s2[1] & 128) === 0) {
-        s2 = s2.slice(1);
-      }
-      let arr = [2];
-      constructLength(arr, r2.length);
-      arr = arr.concat(r2);
-      arr.push(2);
-      constructLength(arr, s2.length);
-      const backHalf = arr.concat(s2);
-      let res = [48];
-      constructLength(res, backHalf.length);
-      res = res.concat(backHalf);
       if (enc === "hex") {
         return toHex(res);
-      } else if (enc === "base64") {
-        return toBase64(res);
       } else {
         return res;
       }
     }
     /**
-     * Converts an instance of Signature into Compact encoding.
+     * Converts the point coordinates to a hexadecimal string. A wrapper method
+     * for encode. Byte 0x02 or 0x03 is used as prefix based on the 'y' coordinate being even or odd respectively.
      *
-     * If the encoding parameter is set to 'hex', the function will return a hex string.
-     * If 'base64', it will return a base64 string.
-     * Otherwise, it will return an array of numbers.
-     *
-     * @method toCompact
-     * @param enc - The encoding to use for the output.
-     * @returns The current instance in DER encoding.
+     * @method toString
+     * @returns {string} A hexadecimal string representation of the point coordinates.
      *
      * @example
-     * const compact = signature.toCompact(3, true, 'base64');
+     * const aPoint = new Point(x, y);
+     * const stringPoint = aPoint.toString();
      */
-    toCompact(recovery, compressed, enc) {
-      if (recovery < 0 || recovery > 3)
-        throw new Error("Invalid recovery param");
-      if (typeof compressed !== "boolean") {
-        throw new Error("Invalid compressed param");
+    toString() {
+      return this.encode(true, "hex");
+    }
+    /**
+     * Exports the x and y coordinates of the point, and the precomputed doubles and non-adjacent form (NAF) for optimization. The output is an array.
+     *
+     * @method toJSON
+     * @returns An Array where first two elements are the coordinates of the point and optional third element is an object with doubles and NAF points.
+     *
+     * @example
+     * const aPoint = new Point(x, y);
+     * const jsonPoint = aPoint.toJSON();
+     */
+    toJSON() {
+      if (this.precomputed == null) {
+        return [this.x, this.y];
       }
-      let compactByte = 27 + recovery;
-      if (compressed) {
-        compactByte += 4;
+      return [
+        this.x,
+        this.y,
+        typeof this.precomputed === "object" && this.precomputed !== null ? {
+          doubles: this.precomputed.doubles == null ? void 0 : {
+            step: this.precomputed.doubles.step,
+            points: this.precomputed.doubles.points.slice(1)
+          },
+          naf: this.precomputed.naf == null ? void 0 : {
+            wnd: this.precomputed.naf.wnd,
+            points: this.precomputed.naf.points.slice(1)
+          }
+        } : void 0
+      ];
+    }
+    /**
+     * Provides the point coordinates in a human-readable string format for debugging purposes.
+     *
+     * @method inspect
+     * @returns String of the format '<EC Point x: x-coordinate y: y-coordinate>', or '<EC Point Infinity>' if the point is at infinity.
+     *
+     * @example
+     * const aPoint = new Point(x, y);
+     * console.log(aPoint.inspect());
+     */
+    inspect() {
+      if (this.isInfinity()) {
+        return "<EC Point Infinity>";
       }
-      let arr = [compactByte];
-      arr = arr.concat(this.r.toArray("be", 32));
-      arr = arr.concat(this.s.toArray("be", 32));
-      if (enc === "hex") {
-        return toHex(arr);
-      } else if (enc === "base64") {
-        return toBase64(arr);
+      return "<EC Point x: " + (this.x?.fromRed()?.toString(16, 2) ?? "undefined") + " y: " + (this.y?.fromRed()?.toString(16, 2) ?? "undefined") + ">";
+    }
+    /**
+     * Checks if the point is at infinity.
+     * @method isInfinity
+     * @returns Returns whether or not the point is at infinity.
+     *
+     * @example
+     * const p = new Point(null, null);
+     * console.log(p.isInfinity()); // outputs: true
+     */
+    isInfinity() {
+      return this.inf;
+    }
+    /**
+     * Adds another Point to this Point, returning a new Point.
+     *
+     * @method add
+     * @param p - The Point to add to this one.
+     * @returns A new Point that results from the addition.
+     *
+     * @example
+     * const p1 = new Point(1, 2);
+     * const p2 = new Point(2, 3);
+     * const result = p1.add(p2);
+     */
+    add(p) {
+      if (this.inf) {
+        return p;
+      }
+      if (p.inf) {
+        return this;
+      }
+      if (this.eq(p)) {
+        return this.dbl();
+      }
+      if (this.neg().eq(p)) {
+        return new _Point(null, null);
+      }
+      if (this.x?.cmp(p.x ?? new BigNumber(0)) === 0) {
+        return new _Point(null, null);
+      }
+      const P1 = {
+        X: BigInt("0x" + this.x.fromRed().toString(16)),
+        Y: BigInt("0x" + this.y.fromRed().toString(16)),
+        Z: BI_ONE
+      };
+      const Q1 = {
+        X: BigInt("0x" + p.x.fromRed().toString(16)),
+        Y: BigInt("0x" + p.y.fromRed().toString(16)),
+        Z: BI_ONE
+      };
+      const R2 = jpAdd(P1, Q1);
+      if (R2.Z === BI_ZERO)
+        return new _Point(null, null);
+      const zInv = biModInv(R2.Z);
+      const zInv2 = biModMul(zInv, zInv);
+      const xRes = biModMul(R2.X, zInv2);
+      const yRes = biModMul(R2.Y, biModMul(zInv2, zInv));
+      return new _Point(xRes.toString(16), yRes.toString(16));
+    }
+    /**
+     * Doubles the current point.
+     *
+     * @method dbl
+     *
+     * @example
+     * const P = new Point('123', '456');
+     * const result = P.dbl();
+     * */
+    dbl() {
+      if (this.inf)
+        return this;
+      if (this.x === null || this.y === null) {
+        throw new Error("Point coordinates cannot be null");
+      }
+      const X = BigInt("0x" + this.x.fromRed().toString(16));
+      const Y = BigInt("0x" + this.y.fromRed().toString(16));
+      if (Y === BI_ZERO)
+        return new _Point(null, null);
+      const R2 = jpDouble({ X, Y, Z: BI_ONE });
+      const zInv = biModInv(R2.Z);
+      const zInv2 = biModMul(zInv, zInv);
+      const xRes = biModMul(R2.X, zInv2);
+      const yRes = biModMul(R2.Y, biModMul(zInv2, zInv));
+      return new _Point(xRes.toString(16), yRes.toString(16));
+    }
+    /**
+     * Returns X coordinate of point
+     *
+     * @example
+     * const P = new Point('123', '456');
+     * const x = P.getX();
+     */
+    getX() {
+      return (this.x ?? new BigNumber(0)).fromRed();
+    }
+    /**
+     * Returns X coordinate of point
+     *
+     * @example
+     * const P = new Point('123', '456');
+     * const x = P.getX();
+     */
+    getY() {
+      return (this.y ?? new BigNumber(0)).fromRed();
+    }
+    /**
+     * Multiplies this Point by a scalar value, returning a new Point.
+     *
+     * @method mul
+     * @param k - The scalar value to multiply this Point by.
+     * @returns  A new Point that results from the multiplication.
+     *
+     * @example
+     * const p = new Point(1, 2);
+     * const result = p.mul(2); // this doubles the Point
+     */
+    mul(k) {
+      if (!BigNumber.isBN(k)) {
+        k = new BigNumber(k, 16);
+      }
+      k = k;
+      if (this.inf) {
+        return this;
+      }
+      const isNeg = k.isNeg();
+      const kAbs = isNeg ? k.neg() : k;
+      let kBig = BigInt("0x" + kAbs.toString(16));
+      kBig = biMod(kBig);
+      if (kBig === BI_ZERO) {
+        return new _Point(null, null);
+      }
+      if (kBig === BI_ZERO) {
+        return new _Point(null, null);
+      }
+      if (this.x === null || this.y === null) {
+        throw new Error("Point coordinates cannot be null");
+      }
+      let Px;
+      let Py;
+      if (this === this.curve.g) {
+        Px = GX_BIGINT;
+        Py = GY_BIGINT;
       } else {
-        return arr;
+        Px = BigInt("0x" + this.x.fromRed().toString(16));
+        Py = BigInt("0x" + this.y.fromRed().toString(16));
       }
+      const R2 = scalarMultiplyWNAF(kBig, { x: Px, y: Py });
+      if (R2.Z === BI_ZERO) {
+        return new _Point(null, null);
+      }
+      const zInv = biModInv(R2.Z);
+      const zInv2 = biModMul(zInv, zInv);
+      const xRes = biModMul(R2.X, zInv2);
+      const yRes = biModMul(R2.Y, biModMul(zInv2, zInv));
+      const xBN = new BigNumber(xRes.toString(16), 16);
+      const yBN = new BigNumber(yRes.toString(16), 16);
+      const result = new _Point(xBN, yBN);
+      if (isNeg) {
+        return result.neg();
+      }
+      return result;
+    }
+    mulCT(k) {
+      if (!BigNumber.isBN(k)) {
+        k = new BigNumber(k, 16);
+      }
+      k = k;
+      if (this.inf)
+        return new _Point(null, null);
+      const isNeg = k.isNeg();
+      const kAbs = isNeg ? k.neg() : k;
+      let kBig = BigInt("0x" + kAbs.toString(16));
+      kBig = biMod(kBig);
+      if (kBig === 0n)
+        return new _Point(null, null);
+      const Px = this === this.curve.g ? GX_BIGINT : BigInt("0x" + this.getX().toString(16));
+      const Py = this === this.curve.g ? GY_BIGINT : BigInt("0x" + this.getY().toString(16));
+      let R0 = { X: 0n, Y: 1n, Z: 0n };
+      let R1 = { X: Px, Y: Py, Z: 1n };
+      const bits = kBig.toString(2);
+      for (const bitChar of bits) {
+        const bit = bitChar === "1" ? 1n : 0n;
+        ctSwap(bit, R0, R1);
+        R1 = jpAdd(R0, R1);
+        R0 = jpDouble(R0);
+        ctSwap(bit, R0, R1);
+      }
+      if (R0.Z === 0n)
+        return new _Point(null, null);
+      const zInv = biModInv(R0.Z);
+      const zInv2 = biModMul(zInv, zInv);
+      const x = biModMul(R0.X, zInv2);
+      const y = biModMul(R0.Y, biModMul(zInv2, zInv));
+      const result = new _Point(x.toString(16), y.toString(16));
+      return isNeg ? result.neg() : result;
     }
     /**
-     * Recovers the public key from a signature.
-     * This method will return the public key if it finds a valid public key.
-     * If it does not find a valid public key, it will throw an error.
-     * The recovery factor is a number between 0 and 3.
-     * @method RecoverPublicKey
-     * @param recovery - The recovery factor.
-     * @param e - The message hash.
-     * @returns The public key associated with the signature.
+     * Performs a multiplication and addition operation in a single step.
+     * Multiplies this Point by k1, adds the resulting Point to the result of p2 multiplied by k2.
+     *
+     * @method mulAdd
+     * @param k1 - The scalar value to multiply this Point by.
+     * @param p2 - The other Point to be involved in the operation.
+     * @param k2 - The scalar value to multiply the Point p2 by.
+     * @returns A Point that results from the combined multiplication and addition operations.
      *
      * @example
-     * const publicKey = signature.RecoverPublicKey(0, msgHash);
+     * const p1 = new Point(1, 2);
+     * const p2 = new Point(2, 3);
+     * const result = p1.mulAdd(2, p2, 3);
      */
-    RecoverPublicKey(recovery, e) {
-      const r2 = this.r;
-      const s2 = this.s;
-      const isYOdd = (recovery & 1) !== 0;
-      const isSecondKey = recovery >> 1;
-      const curve2 = new Curve();
-      const n = curve2.n;
-      const G = curve2.g;
-      const x = isSecondKey !== 0 ? r2.add(n) : r2;
-      const R2 = Point.fromX(x, isYOdd);
-      const nR = R2.mul(n);
-      if (!nR.isInfinity()) {
-        throw new Error("nR is not at infinity");
-      }
-      const eNeg = e.neg().umod(n);
-      const rInv = r2.invm(n);
-      const srInv = rInv.mul(s2).umod(n);
-      const eInvrInv = rInv.mul(eNeg).umod(n);
-      const Q = G.mul(eInvrInv).add(R2.mul(srInv));
-      const pubKey = new PublicKey(Q);
-      pubKey.validate();
-      return pubKey;
+    mulAdd(k1, p2, k2) {
+      const points = [this, p2];
+      const coeffs = [k1, k2];
+      return this._endoWnafMulAdd(points, coeffs);
     }
     /**
-     * Calculates the recovery factor which will work for a particular public key and message hash.
-     * This method will return the recovery factor if it finds a valid recovery factor.
-     * If it does not find a valid recovery factor, it will throw an error.
-     * The recovery factor is a number between 0 and 3.
+     * Performs the Jacobian multiplication and addition operation in a single
+     * step. Instead of returning a regular Point, the result is a JacobianPoint.
      *
-     * @method CalculateRecoveryFactor
-     * @param msgHash - The message hash.
-     * @returns the recovery factor: number
-     * /
+     * @method jmulAdd
+     * @param k1 - The scalar value to multiply this Point by.
+     * @param p2 - The other Point to be involved in the operation
+     * @param k2 - The scalar value to multiply the Point p2 by.
+     * @returns A JacobianPoint that results from the combined multiplication and addition operation.
+     *
      * @example
-     * const recovery = signature.CalculateRecoveryFactor(publicKey, msgHash);
+     * const p1 = new Point(1, 2);
+     * const p2 = new Point(2, 3);
+     * const result = p1.jmulAdd(2, p2, 3);
      */
-    CalculateRecoveryFactor(pubkey, msgHash) {
-      for (let recovery = 0; recovery < 4; recovery++) {
-        let Qprime;
-        try {
-          Qprime = this.RecoverPublicKey(recovery, msgHash);
-        } catch {
-          continue;
-        }
-        if (pubkey.eq(Qprime)) {
-          return recovery;
-        }
-      }
-      throw new Error("Unable to find valid recovery factor");
-    }
-  };
-
-  // node_modules/@bsv/sdk/dist/esm/src/primitives/DRBG.js
-  var DRBG = class {
-    K;
-    V;
-    constructor(entropy, nonce) {
-      const entropyBytes = toArray2(entropy, "hex");
-      const nonceBytes = toArray2(nonce, "hex");
-      if (entropyBytes.length !== 32) {
-        throw new Error("Entropy must be exactly 32 bytes (256 bits)");
-      }
-      if (nonceBytes.length !== 32) {
-        throw new Error("Nonce must be exactly 32 bytes (256 bits)");
-      }
-      const seedMaterial = entropyBytes.concat(nonceBytes);
-      this.K = new Array(32);
-      this.V = new Array(32);
-      for (let i = 0; i < 32; i++) {
-        this.K[i] = 0;
-        this.V[i] = 1;
-      }
-      this.update(seedMaterial);
+    jmulAdd(k1, p2, k2) {
+      const points = [this, p2];
+      const coeffs = [k1, k2];
+      return this._endoWnafMulAdd(points, coeffs, true);
     }
     /**
-     * Generates HMAC using the K value of the instance. This method is used internally for operations.
+     * Checks if the Point instance is equal to another given Point.
      *
-     * @method hmac
-     * @returns The SHA256HMAC object created with K value.
+     * @method eq
+     * @param p - The Point to be checked if equal to the current instance.
+     *
+     * @returns Whether the two Point instances are equal. Both the 'x' and 'y' coordinates have to match, and both points have to either be valid or at infinity for equality. If both conditions are true, it returns true, else it returns false.
      *
      * @example
-     * const hmac = drbg.hmac();
+     * const p1 = new Point(5, 20);
+     * const p2 = new Point(5, 20);
+     * const areEqual = p1.eq(p2); // returns true
      */
-    hmac() {
-      return new SHA256HMAC(this.K);
+    eq(p) {
+      return this === p || this.inf === p.inf && (this.inf || (this.x ?? new BigNumber(0)).cmp(p.x ?? new BigNumber(0)) === 0 && (this.y ?? new BigNumber(0)).cmp(p.y ?? new BigNumber(0)) === 0);
     }
     /**
-     * Updates the `K` and `V` values of the instance based on the seed.
-     * The seed if not provided uses `V` as seed.
+     * Negate a point. The negation of a point P is the mirror of P about x-axis.
      *
-     * @method update
-     * @param seed - an optional value that used to update `K` and `V`. Default is `undefined`.
-     * @returns Nothing, but updates the internal state `K` and `V` value.
+     * @method neg
      *
      * @example
-     * drbg.update('e13af...');
+     * const P = new Point('123', '456');
+     * const result = P.neg();
      */
-    update(seed) {
-      let kmac = this.hmac().update(this.V).update([0]);
-      if (seed !== void 0) {
-        kmac = kmac.update(seed);
+    neg(_precompute) {
+      if (this.inf) {
+        return this;
       }
-      this.K = kmac.digest();
-      this.V = this.hmac().update(this.V).digest();
-      if (seed === void 0) {
+      const res = new _Point(this.x, (this.y ?? new BigNumber(0)).redNeg());
+      if (_precompute === true && this.precomputed != null) {
+        const pre = this.precomputed;
+        const negate = (p) => p.neg();
+        res.precomputed = {
+          naf: pre.naf == null ? void 0 : {
+            wnd: pre.naf.wnd,
+            points: pre.naf.points.map(negate)
+          },
+          doubles: pre.doubles == null ? void 0 : {
+            step: pre.doubles.step,
+            points: pre.doubles.points.map((p) => p.neg())
+          },
+          beta: void 0
+        };
+      }
+      return res;
+    }
+    /**
+     * Performs the "doubling" operation on the Point a given number of times.
+     * This is used in elliptic curve operations to perform multiplication by 2, multiple times.
+     * If the point is at infinity, it simply returns the point because doubling
+     * a point at infinity is still infinity.
+     *
+     * @method dblp
+     * @param k - The number of times the "doubling" operation is to be performed on the Point.
+     * @returns The Point after 'k' "doubling" operations have been performed.
+     *
+     * @example
+     * const p = new Point(5, 20);
+     * const doubledPoint = p.dblp(10); // returns the point after "doubled" 10 times
+     */
+    dblp(k) {
+      let r2;
+      for (let i = 0; i < k; i++) {
+        r2 = (r2 ?? this).dbl();
+      }
+      return r2 ?? this;
+    }
+    /**
+     * Converts the point to a Jacobian point. If the point is at infinity, the corresponding Jacobian point
+     * will also be at infinity.
+     *
+     * @method toJ
+     * @returns Returns a new Jacobian point based on the current point.
+     *
+     * @example
+     * const point = new Point(xCoordinate, yCoordinate);
+     * const jacobianPoint = point.toJ();
+     */
+    toJ() {
+      if (this.inf) {
+        return new JacobianPoint(null, null, null);
+      }
+      const res = new JacobianPoint(this.x, this.y, this.curve.one);
+      return res;
+    }
+    _getBeta() {
+      if (typeof this.curve.endo !== "object") {
         return;
       }
-      this.K = this.hmac().update(this.V).update([1]).update(seed).digest();
-      this.V = this.hmac().update(this.V).digest();
-    }
-    /**
-     * Generates deterministic random hexadecimal string of given length.
-     * In every generation process, it also updates the internal state `K` and `V`.
-     *
-     * @method generate
-     * @param len - The length of required random number.
-     * @returns The required deterministic random hexadecimal string.
-     *
-     * @example
-     * const randomHex = drbg.generate(256);
-     */
-    generate(len) {
-      let temp = [];
-      while (temp.length < len) {
-        this.V = this.hmac().update(this.V).digest();
-        temp = temp.concat(this.V);
+      const pre = this.precomputed;
+      if (typeof pre === "object" && pre !== null && typeof pre.beta === "object" && pre.beta !== null) {
+        return pre.beta;
       }
-      const res = temp.slice(0, len);
-      this.update();
-      return toHex(res);
-    }
-  };
-
-  // node_modules/@bsv/sdk/dist/esm/src/primitives/ECDSA.js
-  function truncateToN(msg, truncOnly, curve2 = new Curve()) {
-    const delta = msg.byteLength() * 8 - curve2.n.bitLength();
-    if (delta > 0) {
-      msg.iushrn(delta);
-    }
-    if (truncOnly !== true && msg.cmp(curve2.n) >= 0) {
-      return msg.sub(curve2.n);
-    } else {
-      return msg;
-    }
-  }
-  function bnToBigInt(bn) {
-    const bytes2 = bn.toArray("be");
-    let x = 0n;
-    for (let i = 0; i < bytes2.length; i++) {
-      x = x << 8n | BigInt(bytes2[i]);
-    }
-    return x;
-  }
-  var curve = new Curve();
-  var bytes = curve.n.byteLength();
-  var ns1 = curve.n.subn(1);
-  var halfN = N_BIGINT >> 1n;
-  var sign = (msg, key, forceLowS = false, customK) => {
-    const nBitLength = curve.n.bitLength();
-    if (msg.bitLength() > nBitLength) {
-      throw new Error(`ECDSA message is too large: expected <= ${nBitLength} bits. Callers must hash messages before signing.`);
-    }
-    msg = truncateToN(msg);
-    const msgBig = bnToBigInt(msg);
-    const keyBig = bnToBigInt(key);
-    const bkey = key.toArray("be", bytes);
-    const nonce = msg.toArray("be", bytes);
-    const drbg = new DRBG(bkey, nonce);
-    for (let iter = 0; ; iter++) {
-      let kBN = typeof customK === "function" ? customK(iter) : BigNumber.isBN(customK) ? customK : new BigNumber(drbg.generate(bytes), 16);
-      if (kBN == null) {
-        throw new Error("k is undefined");
+      const beta = new _Point((this.x ?? new BigNumber(0)).redMul(this.curve.endo.beta), this.y);
+      if (pre != null) {
+        const curve2 = this.curve;
+        const endoMul = (basePoint) => {
+          const p = basePoint;
+          if (p.x === null) {
+            throw new Error("p.x is null");
+          }
+          if (curve2.endo === void 0 || curve2.endo === null) {
+            throw new Error("curve.endo is undefined");
+          }
+          return new _Point(p.x.redMul(curve2.endo.beta), p.y);
+        };
+        pre.beta = beta;
+        beta.precomputed = {
+          beta: null,
+          naf: pre.naf == null ? void 0 : {
+            wnd: pre.naf.wnd,
+            points: pre.naf.points.map(endoMul)
+          },
+          doubles: pre.doubles == null ? void 0 : {
+            step: pre.doubles.step,
+            points: pre.doubles.points.map(endoMul)
+          }
+        };
       }
-      kBN = truncateToN(kBN, true);
-      if (kBN.cmpn(1) < 0 || kBN.cmp(ns1) > 0) {
-        if (BigNumber.isBN(customK)) {
-          throw new Error("Invalid fixed custom K value (must be >1 and <N-1)");
+      return beta;
+    }
+    _fixedNafMul(k) {
+      if (typeof this.precomputed !== "object" || this.precomputed === null) {
+        throw new Error("_fixedNafMul requires precomputed values for the point");
+      }
+      const doubles = this._getDoubles();
+      const naf = this.curve.getNAF(k, 1, this.curve._bitLength);
+      let I = (1 << doubles.step + 1) - (doubles.step % 2 === 0 ? 2 : 1);
+      I /= 3;
+      const repr = [];
+      for (let j = 0; j < naf.length; j += doubles.step) {
+        let nafW = 0;
+        for (let k2 = j + doubles.step - 1; k2 >= j; k2--) {
+          nafW = (nafW << 1) + naf[k2];
         }
-        continue;
+        repr.push(nafW);
       }
-      const R2 = curve.g.mulCT(kBN);
-      if (R2.isInfinity()) {
-        if (BigNumber.isBN(customK)) {
-          throw new Error("Invalid fixed custom K value (k\xB7G at infinity)");
+      let a = new JacobianPoint(null, null, null);
+      let b = new JacobianPoint(null, null, null);
+      for (let i = I; i > 0; i--) {
+        for (let j = 0; j < repr.length; j++) {
+          const nafW = repr[j];
+          if (nafW === i) {
+            b = b.mixedAdd(doubles.points[j]);
+          } else if (nafW === -i) {
+            b = b.mixedAdd(doubles.points[j].neg());
+          }
         }
-        continue;
+        a = a.add(b);
       }
-      const xAff = BigInt("0x" + R2.getX().toString(16));
-      const rBig = modN(xAff);
-      if (rBig === 0n) {
-        if (BigNumber.isBN(customK)) {
-          throw new Error("Invalid fixed custom K value (r == 0)");
+      return a.toP();
+    }
+    _prepareWnafWindows(defW, points, len, wndWidth, wnd) {
+      for (let index = 0; index < len; index++) {
+        const nafPoints = points[index]._getNAFPoints(defW);
+        wndWidth[index] = nafPoints.wnd;
+        wnd[index] = nafPoints.points;
+      }
+    }
+    _combineWnafPair(a, b, context) {
+      const { points, coeffs, wndWidth, wnd, naf, currentMax } = context;
+      if (wndWidth[a] !== 1 || wndWidth[b] !== 1) {
+        naf[a] = this.curve.getNAF(coeffs[a], wndWidth[a], this.curve._bitLength);
+        naf[b] = this.curve.getNAF(coeffs[b], wndWidth[b], this.curve._bitLength);
+        return Math.max(currentMax, naf[a].length, naf[b].length);
+      }
+      const comb = [points[a], null, null, points[b]];
+      const aY = points[a].y ?? new BigNumber(0);
+      const bY = points[b].y ?? new BigNumber(0);
+      if (aY.cmp(bY) === 0) {
+        comb[1] = points[a].add(points[b]);
+        comb[2] = points[a].toJ().mixedAdd(points[b].neg());
+      } else if (aY.cmp(bY.redNeg()) === 0) {
+        comb[1] = points[a].toJ().mixedAdd(points[b]);
+        comb[2] = points[a].add(points[b].neg());
+      } else {
+        comb[1] = points[a].toJ().mixedAdd(points[b]);
+        comb[2] = points[a].toJ().mixedAdd(points[b].neg());
+      }
+      const index = [-3, -1, -5, -7, 0, 7, 5, 1, 3];
+      const jsf = this.curve.getJSF(coeffs[a], coeffs[b]);
+      const max = Math.max(currentMax, jsf[0].length);
+      naf[a] = Array.from({ length: max });
+      naf[b] = Array.from({ length: max });
+      for (let position = 0; position < max; position++) {
+        const ja = Math.trunc(jsf[0][position]);
+        const jb = Math.trunc(jsf[1][position]);
+        naf[a][position] = index[(ja + 1) * 3 + (jb + 1)];
+        naf[b][position] = 0;
+        wnd[a] = comb;
+      }
+      return max;
+    }
+    _prepareWnafRepresentations(points, coeffs, len, wndWidth, wnd, naf) {
+      let max = 0;
+      for (let index = len - 1; index >= 1; index -= 2) {
+        max = this._combineWnafPair(index - 1, index, {
+          points,
+          coeffs,
+          wndWidth,
+          wnd,
+          naf,
+          currentMax: max
+        });
+      }
+      return max;
+    }
+    _collectWnafStep(start, len, naf, tmp) {
+      let index = start;
+      let doubles = 0;
+      while (index >= 0) {
+        let zero = true;
+        for (let point = 0; point < len; point++) {
+          tmp[point] = new BigNumber(typeof naf[point][index] === "number" ? naf[point][index] : 0);
+          if (!tmp[point].isZero())
+            zero = false;
         }
-        continue;
+        if (!zero)
+          break;
+        doubles++;
+        index--;
       }
-      const kBig = BigInt("0x" + kBN.toString(16));
-      const kInv = modInvN(kBig);
-      const rTimesKey = modMulN(rBig, keyBig);
-      const sum = modN(msgBig + rTimesKey);
-      let sBig = modMulN(kInv, sum);
-      if (sBig === 0n) {
-        if (BigNumber.isBN(customK)) {
-          throw new Error("Invalid fixed custom K value (s == 0)");
+      if (index >= 0)
+        doubles++;
+      return { index, doubles };
+    }
+    _addWnafStep(accumulator, len, tmp, wnd) {
+      const one = new BigNumber(1);
+      const two = new BigNumber(2);
+      let result = accumulator;
+      for (let index = 0; index < len; index++) {
+        const value = tmp[index];
+        if (value.cmpn(0) === 0)
+          continue;
+        const point = value.isNeg() ? wnd[index][value.neg().sub(one).div(two).toNumber()].neg() : wnd[index][value.sub(one).div(two).toNumber()];
+        result = point.type === "affine" ? result.mixedAdd(point) : result.add(point);
+      }
+      return result;
+    }
+    _wnafMulAdd(defW, points, coeffs, len, jacobianResult) {
+      const scratchLength = this.curve._wnafT1.length;
+      const wndWidth = Array.from({ length: scratchLength });
+      const wnd = Array.from({ length: scratchLength }, () => []);
+      const naf = Array.from({ length: scratchLength }, () => []);
+      this._prepareWnafWindows(defW, points, len, wndWidth, wnd);
+      const max = this._prepareWnafRepresentations(points, coeffs, len, wndWidth, wnd, naf);
+      let acc = new JacobianPoint(null, null, null);
+      const tmp = this.curve._wnafT4;
+      let index = max;
+      while (index >= 0) {
+        const step = this._collectWnafStep(index, len, naf, tmp);
+        index = step.index;
+        acc = acc.dblp(step.doubles);
+        if (index < 0)
+          break;
+        acc = this._addWnafStep(acc, len, tmp, wnd);
+        index--;
+      }
+      for (let i = 0; i < len; i++) {
+        wnd[i] = [];
+      }
+      if (jacobianResult === true) {
+        return acc;
+      } else {
+        return acc.toP();
+      }
+    }
+    _endoWnafMulAdd(points, coeffs, jacobianResult) {
+      const npoints = Array.from({ length: points.length * 2 });
+      const ncoeffs = Array.from({ length: points.length * 2 });
+      let i;
+      for (i = 0; i < points.length; i++) {
+        const split2 = this.curve._endoSplit(coeffs[i]);
+        let p = points[i];
+        let beta = p._getBeta() ?? new _Point(null, null);
+        if (split2.k1.negative !== 0) {
+          split2.k1.ineg();
+          p = p.neg(true);
         }
-        continue;
+        if (split2.k2.negative !== 0) {
+          split2.k2.ineg();
+          beta = beta.neg(true);
+        }
+        npoints[i * 2] = p;
+        npoints[i * 2 + 1] = beta;
+        ncoeffs[i * 2] = split2.k1;
+        ncoeffs[i * 2 + 1] = split2.k2;
       }
-      if (forceLowS && sBig > halfN) {
-        sBig = N_BIGINT - sBig;
+      const res = this._wnafMulAdd(1, npoints, ncoeffs, i * 2, jacobianResult);
+      for (let j = 0; j < i * 2; j++) {
+        npoints[j] = null;
+        ncoeffs[j] = null;
       }
-      const r2 = new BigNumber(rBig.toString(16), 16);
-      const s2 = new BigNumber(sBig.toString(16), 16);
-      return new Signature(r2, s2);
+      return res;
     }
-  };
-  var verify = (msg, sig, key) => {
-    const nBitLength = curve.n.bitLength();
-    if (msg.bitLength() > nBitLength) {
-      return false;
+    _hasDoubles(k) {
+      if (this.precomputed == null) {
+        return false;
+      }
+      const doubles = this.precomputed.doubles;
+      if (typeof doubles !== "object") {
+        return false;
+      }
+      return doubles.points.length >= Math.ceil((k.bitLength() + 1) / doubles.step);
     }
-    const hash = bnToBigInt(msg);
-    if (key.x == null || key.y == null) {
-      throw new Error("Invalid public key: missing coordinates.");
+    _getDoubles(step, power) {
+      if (typeof this.precomputed === "object" && this.precomputed !== null && typeof this.precomputed.doubles === "object" && this.precomputed.doubles !== null) {
+        return this.precomputed.doubles;
+      }
+      const doubles = [this];
+      let acc;
+      for (let i = 0; i < (power ?? 0); i += step ?? 1) {
+        for (let j = 0; j < (step ?? 1); j++) {
+          acc = (acc ?? this).dbl();
+        }
+        doubles.push(acc);
+      }
+      return {
+        step: step ?? 1,
+        points: doubles
+      };
     }
-    const publicKey = {
-      x: bnToBigInt(key.x),
-      y: bnToBigInt(key.y)
-    };
-    const signature = {
-      r: bnToBigInt(sig.r),
-      s: bnToBigInt(sig.s)
-    };
-    const { r: r2, s: s2 } = signature;
-    const z = hash;
-    if (r2 <= BI_ZERO || r2 >= N_BIGINT || s2 <= BI_ZERO || s2 >= N_BIGINT) {
-      return false;
+    _getNAFPoints(wnd) {
+      if (typeof this.precomputed === "object" && this.precomputed !== null && typeof this.precomputed.naf === "object" && this.precomputed.naf !== null) {
+        return this.precomputed.naf;
+      }
+      const res = [this];
+      const max = (1 << wnd) - 1;
+      const dbl = max === 1 ? null : this.dbl();
+      for (let i = 1; i < max; i++) {
+        if (dbl !== null) {
+          res[i] = res[i - 1].add(dbl);
+        }
+      }
+      return {
+        wnd,
+        points: res
+      };
     }
-    const w = modInvN(s2);
-    if (w === 0n)
-      return false;
-    const u1 = modMulN(z, w);
-    const u2 = modMulN(r2, w);
-    const RG = scalarMultiplyWNAF(u1, { x: GX_BIGINT, y: GY_BIGINT });
-    const RQ = scalarMultiplyWNAF(u2, publicKey);
-    const R2 = jpAdd(RG, RQ);
-    if (R2.Z === 0n)
-      return false;
-    const zInv = biModInv(R2.Z);
-    const zInv2 = biModMul(zInv, zInv);
-    const xAff = biModMul(R2.X, zInv2);
-    const v = modN(xAff);
-    return v === r2;
   };
 
   // node_modules/@bsv/sdk/dist/esm/src/primitives/PublicKey.js
@@ -8421,13 +8081,13 @@
       let sharedSecret;
       if (typeof retrieveCachedSharedSecret === "function") {
         const retrieved = retrieveCachedSharedSecret(privateKey, this);
-        if (typeof retrieved !== "undefined") {
-          sharedSecret = retrieved;
-        } else {
+        if (retrieved === void 0) {
           sharedSecret = this.deriveSharedSecret(privateKey);
           if (typeof cacheSharedSecret === "function") {
             cacheSharedSecret(privateKey, this, sharedSecret);
           }
+        } else {
+          sharedSecret = retrieved;
         }
       } else {
         sharedSecret = this.deriveSharedSecret(privateKey);
@@ -8474,6 +8134,530 @@
     }
   };
 
+  // node_modules/@bsv/sdk/dist/esm/src/primitives/Signature.js
+  var Signature = class _Signature {
+    /**
+     * @property Represents the "r" component of the digital signature
+     */
+    r;
+    /**
+     * @property Represents the "s" component of the digital signature
+     */
+    s;
+    /**
+     * Takes an array of numbers or a string and returns a new Signature instance.
+     * This method will throw an error if the DER encoding is invalid.
+     * If a string is provided, it is assumed to represent a hexadecimal sequence.
+     *
+     * @static
+     * @method fromDER
+     * @param data - The sequence to decode from DER encoding.
+     * @param enc - The encoding of the data string.
+     * @returns The decoded data in the form of Signature instance.
+     *
+     * @example
+     * const signature = Signature.fromDER('30440220018c1f5502f8...', 'hex');
+     */
+    static fromDER(data, enc) {
+      const getLength = (buf, p2) => {
+        const initial = buf[p2.place++];
+        if ((initial & 128) === 0) {
+          return initial;
+        } else {
+          throw new Error("Invalid DER entity length");
+        }
+      };
+      class Position {
+        place = 0;
+      }
+      data = toArray2(data, enc);
+      const p = new Position();
+      if (data[p.place++] !== 48) {
+        throw new Error("Signature DER must start with 0x30");
+      }
+      const len = getLength(data, p);
+      if (len + p.place !== data.length) {
+        throw new Error("Signature DER invalid");
+      }
+      if (data[p.place++] !== 2) {
+        throw new Error("Signature DER invalid");
+      }
+      const rlen = getLength(data, p);
+      let r2 = data.slice(p.place, rlen + p.place);
+      p.place += rlen;
+      if (data[p.place++] !== 2) {
+        throw new Error("Signature DER invalid");
+      }
+      const slen = getLength(data, p);
+      if (data.length !== slen + p.place) {
+        throw new Error("Invalid R-length in signature DER");
+      }
+      let s2 = data.slice(p.place, slen + p.place);
+      if (r2[0] === 0) {
+        if ((r2[1] & 128) === 0) {
+          throw new Error("Invalid R-value in signature DER");
+        } else {
+          r2 = r2.slice(1);
+        }
+      }
+      if (s2[0] === 0) {
+        if ((s2[1] & 128) === 0) {
+          throw new Error("Invalid S-value in signature DER");
+        } else {
+          s2 = s2.slice(1);
+        }
+      }
+      return new _Signature(new BigNumber(r2), new BigNumber(s2));
+    }
+    /**
+     * Takes an array of numbers or a string and returns a new Signature instance.
+     * This method will throw an error if the Compact encoding is invalid.
+     * If a string is provided, it is assumed to represent a hexadecimal sequence.
+     * compactByte value 27-30 means uncompressed public key.
+     * 31-34 means compressed public key.
+     * The range represents the recovery param which can be 0,1,2,3.
+     * We could support recovery functions in future if there's demand.
+     *
+     * @static
+     * @method fromCompact
+     * @param data - The sequence to decode from Compact encoding.
+     * @param enc - The encoding of the data string.
+     * @returns The decoded data in the form of Signature instance.
+     *
+     * @example
+     * const signature = Signature.fromCompact('1b18c1f5502f8...', 'hex');
+     */
+    static fromCompact(data, enc) {
+      data = toArray2(data, enc);
+      if (data.length !== 65) {
+        throw new Error("Invalid Compact Signature");
+      }
+      const compactByte = data[0];
+      if (compactByte < 27 || compactByte >= 35) {
+        throw new Error("Invalid Compact Byte");
+      }
+      return new _Signature(new BigNumber(data.slice(1, 33)), new BigNumber(data.slice(33, 65)));
+    }
+    /**
+     * Creates an instance of the Signature class.
+     *
+     * @constructor
+     * @param r - The R component of the signature.
+     * @param s - The S component of the signature.
+     *
+     * @example
+     * const r = new BigNumber('208755674028...');
+     * const s = new BigNumber('564745627577...');
+     * const signature = new Signature(r, s);
+     */
+    constructor(r2, s2) {
+      this.r = r2;
+      this.s = s2;
+    }
+    /**
+     * Verifies a digital signature.
+     *
+     * This method will return true if the signature, key, and message hash match.
+     * If the data or key do not match the signature, the function returns false.
+     *
+     * @method verify
+     * @param msg - The message to verify.
+     * @param key - The public key used to sign the original message.
+     * @param enc - The encoding of the msg string.
+     * @returns A boolean representing whether the signature is valid.
+     *
+     * @example
+     * const msg = 'The quick brown fox jumps over the lazy dog';
+     * const publicKey = PublicKey.fromString('04188ca1050...');
+     * const isVerified = signature.verify(msg, publicKey);
+     */
+    verify(msg, key, enc) {
+      const msgHash = new BigNumber(sha256(msg, enc), 16);
+      return verify(msgHash, this, key);
+    }
+    /**
+     * Converts an instance of Signature into DER encoding.
+     * An alias for the toDER method.
+     *
+     * If the encoding parameter is set to 'hex', the function will return a hex string.
+     * If 'base64', it will return a base64 string.
+     * Otherwise, it will return an array of numbers.
+     *
+     * @method toDER
+     * @param enc - The encoding to use for the output.
+     * @returns The current instance in DER encoding.
+     *
+     * @example
+     * const der = signature.toString('base64');
+     */
+    toString(enc) {
+      return this.toDER(enc);
+    }
+    /**
+     * Converts an instance of Signature into DER encoding.
+     *
+     * If the encoding parameter is set to 'hex', the function will return a hex string.
+     * If 'base64', it will return a base64 string.
+     * Otherwise, it will return an array of numbers.
+     *
+     * @method toDER
+     * @param enc - The encoding to use for the output.
+     * @returns The current instance in DER encoding.
+     *
+     * @example
+     * const der = signature.toDER('hex');
+     */
+    toDER(enc) {
+      const constructLength = (arr2, len) => {
+        if (len < 128) {
+          arr2.push(len);
+        } else {
+          throw new Error("len must be < 0x80");
+        }
+      };
+      const rmPadding = (buf) => {
+        let i = 0;
+        const len = buf.length - 1;
+        while (buf[i] === 0 && (buf[i + 1] & 128) === 0 && i < len) {
+          i++;
+        }
+        if (i === 0) {
+          return buf;
+        }
+        return buf.slice(i);
+      };
+      let r2 = this.r.toArray();
+      let s2 = this.s.toArray();
+      if ((r2[0] & 128) !== 0) {
+        r2 = [0].concat(r2);
+      }
+      if ((s2[0] & 128) !== 0) {
+        s2 = [0].concat(s2);
+      }
+      r2 = rmPadding(r2);
+      s2 = rmPadding(s2);
+      while (s2[0] === 0 && (s2[1] & 128) === 0) {
+        s2 = s2.slice(1);
+      }
+      let arr = [2];
+      constructLength(arr, r2.length);
+      arr = arr.concat(r2);
+      arr.push(2);
+      constructLength(arr, s2.length);
+      const backHalf = arr.concat(s2);
+      let res = [48];
+      constructLength(res, backHalf.length);
+      res = res.concat(backHalf);
+      if (enc === "hex") {
+        return toHex(res);
+      } else if (enc === "base64") {
+        return toBase64(res);
+      } else {
+        return res;
+      }
+    }
+    /**
+     * Converts an instance of Signature into Compact encoding.
+     *
+     * If the encoding parameter is set to 'hex', the function will return a hex string.
+     * If 'base64', it will return a base64 string.
+     * Otherwise, it will return an array of numbers.
+     *
+     * @method toCompact
+     * @param enc - The encoding to use for the output.
+     * @returns The current instance in DER encoding.
+     *
+     * @example
+     * const compact = signature.toCompact(3, true, 'base64');
+     */
+    toCompact(recovery, compressed, enc) {
+      if (recovery < 0 || recovery > 3)
+        throw new Error("Invalid recovery param");
+      if (typeof compressed !== "boolean") {
+        throw new TypeError("Invalid compressed param");
+      }
+      let compactByte = 27 + recovery;
+      if (compressed) {
+        compactByte += 4;
+      }
+      let arr = [compactByte];
+      arr = arr.concat(this.r.toArray("be", 32));
+      arr = arr.concat(this.s.toArray("be", 32));
+      if (enc === "hex") {
+        return toHex(arr);
+      } else if (enc === "base64") {
+        return toBase64(arr);
+      } else {
+        return arr;
+      }
+    }
+    /**
+     * Recovers the public key from a signature.
+     * This method will return the public key if it finds a valid public key.
+     * If it does not find a valid public key, it will throw an error.
+     * The recovery factor is a number between 0 and 3.
+     * @method RecoverPublicKey
+     * @param recovery - The recovery factor.
+     * @param e - The message hash.
+     * @returns The public key associated with the signature.
+     *
+     * @example
+     * const publicKey = signature.RecoverPublicKey(0, msgHash);
+     */
+    RecoverPublicKey(recovery, e) {
+      const r2 = this.r;
+      const s2 = this.s;
+      const isYOdd = (recovery & 1) !== 0;
+      const isSecondKey = recovery >> 1;
+      const curve2 = new Curve();
+      const n = curve2.n;
+      const G = curve2.g;
+      const x = isSecondKey === 0 ? r2 : r2.add(n);
+      const R2 = Point.fromX(x, isYOdd);
+      const nR = R2.mul(n);
+      if (!nR.isInfinity()) {
+        throw new Error("nR is not at infinity");
+      }
+      const eNeg = e.neg().umod(n);
+      const rInv = r2.invm(n);
+      const srInv = rInv.mul(s2).umod(n);
+      const eInvrInv = rInv.mul(eNeg).umod(n);
+      const Q = G.mul(eInvrInv).add(R2.mul(srInv));
+      const pubKey = new PublicKey(Q);
+      pubKey.validate();
+      return pubKey;
+    }
+    /**
+     * Calculates the recovery factor which will work for a particular public key and message hash.
+     * This method will return the recovery factor if it finds a valid recovery factor.
+     * If it does not find a valid recovery factor, it will throw an error.
+     * The recovery factor is a number between 0 and 3.
+     *
+     * @method CalculateRecoveryFactor
+     * @param msgHash - The message hash.
+     * @returns the recovery factor: number
+     * /
+     * @example
+     * const recovery = signature.CalculateRecoveryFactor(publicKey, msgHash);
+     */
+    CalculateRecoveryFactor(pubkey, msgHash) {
+      for (let recovery = 0; recovery < 4; recovery++) {
+        let Qprime;
+        try {
+          Qprime = this.RecoverPublicKey(recovery, msgHash);
+        } catch {
+          continue;
+        }
+        if (pubkey.eq(Qprime)) {
+          return recovery;
+        }
+      }
+      throw new Error("Unable to find valid recovery factor");
+    }
+  };
+
+  // node_modules/@bsv/sdk/dist/esm/src/primitives/DRBG.js
+  var DRBG = class {
+    K;
+    V;
+    constructor(entropy, nonce) {
+      const entropyBytes = toArray2(entropy, "hex");
+      const nonceBytes = toArray2(nonce, "hex");
+      if (entropyBytes.length !== 32) {
+        throw new Error("Entropy must be exactly 32 bytes (256 bits)");
+      }
+      if (nonceBytes.length !== 32) {
+        throw new Error("Nonce must be exactly 32 bytes (256 bits)");
+      }
+      const seedMaterial = entropyBytes.concat(nonceBytes);
+      this.K = Array.from({ length: 32 });
+      this.V = Array.from({ length: 32 });
+      for (let i = 0; i < 32; i++) {
+        this.K[i] = 0;
+        this.V[i] = 1;
+      }
+      this.update(seedMaterial);
+    }
+    /**
+     * Generates HMAC using the K value of the instance. This method is used internally for operations.
+     *
+     * @method hmac
+     * @returns The SHA256HMAC object created with K value.
+     *
+     * @example
+     * const hmac = drbg.hmac();
+     */
+    hmac() {
+      return new SHA256HMAC(this.K);
+    }
+    /**
+     * Updates the `K` and `V` values of the instance based on the seed.
+     * The seed if not provided uses `V` as seed.
+     *
+     * @method update
+     * @param seed - an optional value that used to update `K` and `V`. Default is `undefined`.
+     * @returns Nothing, but updates the internal state `K` and `V` value.
+     *
+     * @example
+     * drbg.update('e13af...');
+     */
+    update(seed) {
+      let kmac = this.hmac().update(this.V).update([0]);
+      if (seed !== void 0) {
+        kmac = kmac.update(seed);
+      }
+      this.K = kmac.digest();
+      this.V = this.hmac().update(this.V).digest();
+      if (seed === void 0) {
+        return;
+      }
+      this.K = this.hmac().update(this.V).update([1]).update(seed).digest();
+      this.V = this.hmac().update(this.V).digest();
+    }
+    /**
+     * Generates deterministic random hexadecimal string of given length.
+     * In every generation process, it also updates the internal state `K` and `V`.
+     *
+     * @method generate
+     * @param len - The length of required random number.
+     * @returns The required deterministic random hexadecimal string.
+     *
+     * @example
+     * const randomHex = drbg.generate(256);
+     */
+    generate(len) {
+      let temp = [];
+      while (temp.length < len) {
+        this.V = this.hmac().update(this.V).digest();
+        temp = temp.concat(this.V);
+      }
+      const res = temp.slice(0, len);
+      this.update();
+      return toHex(res);
+    }
+  };
+
+  // node_modules/@bsv/sdk/dist/esm/src/primitives/ECDSA.js
+  function truncateToN(msg, truncOnly, curve2 = new Curve()) {
+    const delta = msg.byteLength() * 8 - curve2.n.bitLength();
+    if (delta > 0) {
+      msg.iushrn(delta);
+    }
+    if (truncOnly !== true && msg.cmp(curve2.n) >= 0) {
+      return msg.sub(curve2.n);
+    } else {
+      return msg;
+    }
+  }
+  function bnToBigInt(bn) {
+    const bytes2 = bn.toArray("be");
+    let x = 0n;
+    for (const byte of bytes2) {
+      x = x << 8n | BigInt(byte);
+    }
+    return x;
+  }
+  var curve = new Curve();
+  var bytes = curve.n.byteLength();
+  var ns1 = curve.n.subn(1);
+  var halfN = N_BIGINT >> 1n;
+  function selectK(customK, iter, drbg) {
+    let selected;
+    if (typeof customK === "function") {
+      selected = customK(iter);
+    } else if (customK !== void 0 && BigNumber.isBN(customK)) {
+      selected = customK;
+    } else {
+      selected = new BigNumber(drbg.generate(bytes), 16);
+    }
+    if (selected == null)
+      throw new Error("k is undefined");
+    return truncateToN(selected, true);
+  }
+  function retryOrRejectFixedK(fixedK, message) {
+    if (fixedK)
+      throw new Error(message);
+    return void 0;
+  }
+  function signatureFromK(kBN, msgBig, keyBig, forceLowS, fixedK) {
+    if (kBN.cmpn(1) < 0 || kBN.cmp(ns1) > 0) {
+      return retryOrRejectFixedK(fixedK, "Invalid fixed custom K value (must be >1 and <N-1)");
+    }
+    const R2 = curve.g.mulCT(kBN);
+    if (R2.isInfinity()) {
+      return retryOrRejectFixedK(fixedK, "Invalid fixed custom K value (k\xB7G at infinity)");
+    }
+    const rBig = modN(BigInt("0x" + R2.getX().toString(16)));
+    if (rBig === 0n) {
+      return retryOrRejectFixedK(fixedK, "Invalid fixed custom K value (r == 0)");
+    }
+    const kInv = modInvN(BigInt("0x" + kBN.toString(16)));
+    const sum = modN(msgBig + modMulN(rBig, keyBig));
+    let sBig = modMulN(kInv, sum);
+    if (sBig === 0n) {
+      return retryOrRejectFixedK(fixedK, "Invalid fixed custom K value (s == 0)");
+    }
+    if (forceLowS && sBig > halfN)
+      sBig = N_BIGINT - sBig;
+    return new Signature(new BigNumber(rBig.toString(16), 16), new BigNumber(sBig.toString(16), 16));
+  }
+  var sign = (msg, key, forceLowS = false, customK) => {
+    const nBitLength = curve.n.bitLength();
+    if (msg.bitLength() > nBitLength) {
+      throw new Error(`ECDSA message is too large: expected <= ${nBitLength} bits. Callers must hash messages before signing.`);
+    }
+    msg = truncateToN(msg);
+    const msgBig = bnToBigInt(msg);
+    const keyBig = bnToBigInt(key);
+    const bkey = key.toArray("be", bytes);
+    const nonce = msg.toArray("be", bytes);
+    const drbg = new DRBG(bkey, nonce);
+    const fixedK = BigNumber.isBN(customK);
+    for (let iter = 0; ; iter++) {
+      const signature = signatureFromK(selectK(customK, iter, drbg), msgBig, keyBig, forceLowS, fixedK);
+      if (signature != null)
+        return signature;
+    }
+  };
+  var verify = (msg, sig, key) => {
+    const nBitLength = curve.n.bitLength();
+    if (msg.bitLength() > nBitLength) {
+      return false;
+    }
+    const hash = bnToBigInt(msg);
+    if (key.x == null || key.y == null) {
+      throw new Error("Invalid public key: missing coordinates.");
+    }
+    const publicKey = {
+      x: bnToBigInt(key.x),
+      y: bnToBigInt(key.y)
+    };
+    const signature = {
+      r: bnToBigInt(sig.r),
+      s: bnToBigInt(sig.s)
+    };
+    const { r: r2, s: s2 } = signature;
+    const z = hash;
+    if (r2 <= BI_ZERO || r2 >= N_BIGINT || s2 <= BI_ZERO || s2 >= N_BIGINT) {
+      return false;
+    }
+    const w = modInvN(s2);
+    if (w === 0n)
+      return false;
+    const u1 = modMulN(z, w);
+    const u2 = modMulN(r2, w);
+    const RG = scalarMultiplyWNAF(u1, { x: GX_BIGINT, y: GY_BIGINT });
+    const RQ = scalarMultiplyWNAF(u2, publicKey);
+    const R2 = jpAdd(RG, RQ);
+    if (R2.Z === 0n)
+      return false;
+    const zInv = biModInv(R2.Z);
+    const zInv2 = biModMul(zInv, zInv);
+    const xAff = biModMul(R2.X, zInv2);
+    const v = modN(xAff);
+    return v === r2;
+  };
+
   // node_modules/@bsv/sdk/dist/esm/src/primitives/Random.js
   var Rand = class {
     _rand;
@@ -8494,29 +8678,24 @@
         };
         return;
       }
-      if (typeof process !== "undefined" && process.release?.name === "node") {
-        try {
-          const crypto = __require("crypto");
-          if (typeof crypto.randomBytes === "function") {
-            this._rand = (n) => {
-              return Array.from(crypto.randomBytes(n));
-            };
-            return;
-          }
-        } catch (e) {
+      if (globalThis.self !== void 0 && typeof globalThis.self.crypto?.getRandomValues === "function") {
+        this._rand = (n) => {
+          return this.getRandomValues(globalThis.self, n);
+        };
+        return;
+      }
+      if (globalThis.window !== void 0 && typeof globalThis.window.crypto?.getRandomValues === "function") {
+        this._rand = (n) => {
+          return this.getRandomValues(globalThis.window, n);
+        };
+        return;
+      }
+      if (typeof process !== "undefined" && typeof process.getBuiltinModule === "function") {
+        const nodeCrypto = process.getBuiltinModule("node:crypto");
+        if (typeof nodeCrypto?.randomBytes === "function") {
+          this._rand = (n) => Array.from(nodeCrypto.randomBytes(n));
+          return;
         }
-      }
-      if (typeof self !== "undefined" && typeof self.crypto?.getRandomValues === "function") {
-        this._rand = (n) => {
-          return this.getRandomValues(self, n);
-        };
-        return;
-      }
-      if (typeof window !== "undefined" && typeof window.crypto?.getRandomValues === "function") {
-        this._rand = (n) => {
-          return this.getRandomValues(window, n);
-        };
-        return;
       }
       this._rand = noRand;
     }
@@ -8525,21 +8704,20 @@
     }
   };
   var ayn = null;
-  var Random_default = (len) => {
-    if (ayn == null) {
-      ayn = new Rand();
-    }
+  var Random = (len) => {
+    ayn ??= new Rand();
     return ayn.generate(len);
   };
+  var Random_default = Random;
 
   // node_modules/@bsv/sdk/dist/esm/src/primitives/Polynomial.js
   var PointInFiniteField = class _PointInFiniteField {
     x;
     y;
     constructor(x, y) {
-      const P2 = new Curve().p;
-      this.x = x.umod(P2);
-      this.y = y.umod(P2);
+      const P = new Curve().p;
+      this.x = x.umod(P);
+      this.y = y.umod(P);
     }
     toString() {
       return toBase58(this.x.toArray()) + "." + toBase58(this.y.toArray());
@@ -8557,20 +8735,20 @@
       this.threshold = threshold ?? points.length;
     }
     static fromPrivateKey(key, threshold) {
-      const P2 = new Curve().p;
+      const P = new Curve().p;
       const points = [
         new PointInFiniteField(new BigNumber(0), new BigNumber(key.toArray()))
       ];
       for (let i = 1; i < threshold; i++) {
-        const randomX = new BigNumber(Random_default(32)).umod(P2);
-        const randomY = new BigNumber(Random_default(32)).umod(P2);
+        const randomX = new BigNumber(Random_default(32)).umod(P);
+        const randomY = new BigNumber(Random_default(32)).umod(P);
         points.push(new PointInFiniteField(randomX, randomY));
       }
       return new _Polynomial(points);
     }
     // Evaluate the polynomial at x by using Lagrange interpolation
     valueAt(x) {
-      const P2 = new Curve().p;
+      const P = new Curve().p;
       let y = new BigNumber(0);
       for (let i = 0; i < this.threshold; i++) {
         let term = this.points[i].y;
@@ -8578,14 +8756,14 @@
           if (i !== j) {
             const xj = this.points[j].x;
             const xi = this.points[i].x;
-            const numerator = x.sub(xj).umod(P2);
-            const denominator = xi.sub(xj).umod(P2);
-            const denominatorInverse = denominator.invm(P2);
-            const fraction = numerator.mul(denominatorInverse).umod(P2);
-            term = term.mul(fraction).umod(P2);
+            const numerator = x.sub(xj).umod(P);
+            const denominator = xi.sub(xj).umod(P);
+            const denominatorInverse = denominator.invm(P);
+            const fraction = numerator.mul(denominatorInverse).umod(P);
+            term = term.mul(fraction).umod(P);
           }
         }
-        y = y.add(term).umod(P2);
+        y = y.add(term).umod(P);
       }
       return y;
     }
@@ -8917,13 +9095,13 @@
       let sharedSecret;
       if (typeof retrieveCachedSharedSecret === "function") {
         const retrieved = retrieveCachedSharedSecret(this, publicKey);
-        if (retrieved !== void 0) {
-          sharedSecret = retrieved;
-        } else {
+        if (retrieved === void 0) {
           sharedSecret = this.deriveSharedSecret(publicKey);
           if (typeof cacheSharedSecret === "function") {
             cacheSharedSecret(this, publicKey, sharedSecret);
           }
+        } else {
+          sharedSecret = retrieved;
         }
       } else {
         sharedSecret = this.deriveSharedSecret(publicKey);
@@ -9320,7 +9498,7 @@
   var mul2 = new Uint8Array(256);
   var mul3 = new Uint8Array(256);
   for (let i = 0; i < 256; i++) {
-    const m2 = (i << 1 ^ ((i & 128) !== 0 ? 27 : 0)) & 255;
+    const m2 = (i << 1 ^ ((i & 128) === 0 ? 0 : 27)) & 255;
     mul2[i] = m2;
     mul3[i] = m2 ^ i;
   }
@@ -9656,6 +9834,61 @@
   }
 
   // node_modules/@bsv/sdk/dist/esm/src/primitives/SymmetricKey.js
+  var NODE_CRYPTO_SYM = (() => {
+    const processLike = typeof globalThis === "undefined" ? void 0 : globalThis.process;
+    const getBuiltinModule = processLike?.getBuiltinModule;
+    if (typeof getBuiltinModule === "function") {
+      try {
+        const crypto = getBuiltinModule.call(processLike, "node:crypto");
+        if (crypto != null)
+          return crypto;
+      } catch {
+      }
+    }
+    return void 0;
+  })();
+  var NATIVE_AES_GCM_AVAILABLE = (() => {
+    if (NODE_CRYPTO_SYM == null)
+      return false;
+    return typeof NODE_CRYPTO_SYM.createCipheriv === "function" && typeof NODE_CRYPTO_SYM.createDecipheriv === "function";
+  })();
+  function nativeEncrypt(plaintext, iv, key) {
+    try {
+      const cipher = NODE_CRYPTO_SYM.createCipheriv("aes-256-gcm", Buffer.from(key.buffer, key.byteOffset, key.byteLength), Buffer.from(iv.buffer, iv.byteOffset, iv.byteLength));
+      const encrypted = Buffer.concat([
+        cipher.update(Buffer.from(plaintext.buffer, plaintext.byteOffset, plaintext.byteLength)),
+        cipher.final()
+      ]);
+      const authTag = cipher.getAuthTag();
+      const out = new Uint8Array(iv.length + encrypted.length + authTag.length);
+      let offset = 0;
+      out.set(iv, offset);
+      offset += iv.length;
+      out.set(encrypted, offset);
+      offset += encrypted.length;
+      out.set(authTag, offset);
+      return out;
+    } catch {
+      return null;
+    }
+  }
+  function nativeDecrypt(msgBytes, ivLength, tagLength, key) {
+    try {
+      const iv = msgBytes.slice(0, ivLength);
+      const tagStart = msgBytes.length - tagLength;
+      const ciphertext = msgBytes.slice(ivLength, tagStart);
+      const messageTag = msgBytes.slice(tagStart);
+      const decipher = NODE_CRYPTO_SYM.createDecipheriv("aes-256-gcm", Buffer.from(key.buffer, key.byteOffset, key.byteLength), Buffer.from(iv.buffer, iv.byteOffset, iv.byteLength));
+      decipher.setAuthTag(Buffer.from(messageTag.buffer, messageTag.byteOffset, messageTag.byteLength));
+      const decrypted = Buffer.concat([
+        decipher.update(Buffer.from(ciphertext.buffer, ciphertext.byteOffset, ciphertext.byteLength)),
+        decipher.final()
+      ]);
+      return new Uint8Array(decrypted.buffer, decrypted.byteOffset, decrypted.byteLength);
+    } catch {
+      return null;
+    }
+  }
   var SymmetricKey = class _SymmetricKey extends BigNumber {
     /**
      * Generates a symmetric key randomly.
@@ -9688,6 +9921,12 @@
       const iv = new Uint8Array(Random_default(32));
       const msgBytes = new Uint8Array(toArray2(msg, enc));
       const keyBytes = new Uint8Array(this.toArray("be", 32));
+      if (NATIVE_AES_GCM_AVAILABLE) {
+        const nativeResult = nativeEncrypt(msgBytes, iv, keyBytes);
+        if (nativeResult !== null) {
+          return encode(Array.from(nativeResult), enc);
+        }
+      }
       const { result, authenticationTag } = AESGCM(msgBytes, iv, keyBytes);
       const totalLength = iv.length + result.length + authenticationTag.length;
       const combined = new Uint8Array(totalLength);
@@ -9722,11 +9961,20 @@
       if (msgBytes.length < ivLength + tagLength) {
         throw new Error("Ciphertext too short");
       }
+      const keyBytes = new Uint8Array(this.toArray("be", 32));
+      if (NATIVE_AES_GCM_AVAILABLE) {
+        const nativeResult = nativeDecrypt(msgBytes, ivLength, tagLength, keyBytes);
+        if (nativeResult !== void 0) {
+          if (nativeResult === null) {
+            throw new Error("Decryption failed!");
+          }
+          return encode(Array.from(nativeResult), enc);
+        }
+      }
       const iv = msgBytes.slice(0, ivLength);
       const tagStart = msgBytes.length - tagLength;
       const ciphertext = msgBytes.slice(ivLength, tagStart);
       const messageTag = msgBytes.slice(tagStart);
-      const keyBytes = new Uint8Array(this.toArray("be", 32));
       const result = AESGCMDecrypt(ciphertext, iv, messageTag, keyBytes);
       if (result === null) {
         throw new Error("Decryption failed!");
@@ -9736,7 +9984,7 @@
   };
 
   // node_modules/@bsv/sdk/dist/esm/src/script/OP.js
-  var OP = {
+  var namedOP = {
     // push value
     OP_0: 0,
     // when two op codes have the same value, the top one will be used in standard ASM output
@@ -9958,14 +10206,47 @@
     OP_PUBKEY: 254,
     OP_INVALIDOPCODE: 255
   };
-  for (const name in OP) {
-    if (OP[OP[name]] === void 0)
-      OP[OP[name]] = name;
+  var OP = namedOP;
+  for (const name of Object.keys(namedOP)) {
+    const opcode = namedOP[name];
+    OP[opcode] ??= name;
   }
   var OP_default = OP;
 
   // node_modules/@bsv/sdk/dist/esm/src/script/Script.js
-  var BufferCtor3 = typeof globalThis !== "undefined" ? globalThis.Buffer : void 0;
+  var BufferCtor4 = typeof globalThis === "undefined" ? void 0 : globalThis.Buffer;
+  function serializedChunkPrefix(chunk) {
+    const dataLength = chunk.data?.length ?? 0;
+    if (dataLength === 0 || chunk.op === OP_default.OP_RETURN || chunk.op < OP_default.OP_PUSHDATA1) {
+      return [chunk.op];
+    }
+    if (chunk.op === OP_default.OP_PUSHDATA1) {
+      return [chunk.op, dataLength & 255];
+    }
+    if (chunk.op === OP_default.OP_PUSHDATA2) {
+      return [chunk.op, dataLength & 255, dataLength >> 8 & 255];
+    }
+    if (chunk.op === OP_default.OP_PUSHDATA4) {
+      const size = dataLength >>> 0;
+      return [chunk.op, size & 255, size >> 8 & 255, size >> 16 & 255, size >> 24 & 255];
+    }
+    return void 0;
+  }
+  function chunkMatchesBytes(chunk, targetBytes) {
+    const prefix = serializedChunkPrefix(chunk);
+    const data = chunk.data ?? [];
+    if (prefix == null || targetBytes.length !== prefix.length + data.length)
+      return false;
+    for (let i = 0; i < prefix.length; i++) {
+      if (targetBytes[i] !== prefix[i])
+        return false;
+    }
+    for (let i = 0; i < data.length; i++) {
+      if (targetBytes[prefix.length + i] !== data[i])
+        return false;
+    }
+    return true;
+  }
   var Script = class _Script {
     _chunks;
     parsed;
@@ -9984,63 +10265,43 @@
       const tokens = asm.split(" ");
       let i = 0;
       while (i < tokens.length) {
-        const token = tokens[i];
-        let opCode;
-        let opCodeNum = 0;
-        if (token.startsWith("OP_") && typeof OP_default[token] !== "undefined") {
-          opCode = token;
-          opCodeNum = OP_default[token];
-        }
-        if (token === "0") {
-          opCodeNum = 0;
-          chunks.push({
-            op: opCodeNum
-          });
-          i = i + 1;
-        } else if (token === "-1") {
-          opCodeNum = OP_default.OP_1NEGATE;
-          chunks.push({
-            op: opCodeNum
-          });
-          i = i + 1;
-        } else if (opCode === void 0) {
-          let hex = tokens[i];
-          if (hex.length % 2 !== 0) {
-            hex = "0" + hex;
-          }
-          const arr = toArray2(hex, "hex");
-          if (encode(arr, "hex") !== hex) {
-            throw new Error("invalid hex string in script");
-          }
-          const len = arr.length;
-          if (len >= 0 && len < OP_default.OP_PUSHDATA1) {
-            opCodeNum = len;
-          } else if (len < Math.pow(2, 8)) {
-            opCodeNum = OP_default.OP_PUSHDATA1;
-          } else if (len < Math.pow(2, 16)) {
-            opCodeNum = OP_default.OP_PUSHDATA2;
-          } else if (len < Math.pow(2, 32)) {
-            opCodeNum = OP_default.OP_PUSHDATA4;
-          }
-          chunks.push({
-            data: arr,
-            op: opCodeNum
-          });
-          i = i + 1;
-        } else if (opCodeNum === OP_default.OP_PUSHDATA1 || opCodeNum === OP_default.OP_PUSHDATA2 || opCodeNum === OP_default.OP_PUSHDATA4) {
-          chunks.push({
-            data: toArray2(tokens[i + 2], "hex"),
-            op: opCodeNum
-          });
-          i = i + 3;
-        } else {
-          chunks.push({
-            op: opCodeNum
-          });
-          i = i + 1;
-        }
+        const { chunk, advance } = _Script.parseASMToken(tokens, i);
+        chunks.push(chunk);
+        i += advance;
       }
       return new _Script(chunks);
+    }
+    static pushdataOpCodeNum(len) {
+      if (len >= 0 && len < OP_default.OP_PUSHDATA1)
+        return len;
+      if (len < Math.pow(2, 8))
+        return OP_default.OP_PUSHDATA1;
+      if (len < Math.pow(2, 16))
+        return OP_default.OP_PUSHDATA2;
+      return OP_default.OP_PUSHDATA4;
+    }
+    static parseASMToken(tokens, i) {
+      const token = tokens[i];
+      if (token === "0")
+        return { chunk: { op: 0 }, advance: 1 };
+      if (token === "-1")
+        return { chunk: { op: OP_default.OP_1NEGATE }, advance: 1 };
+      const isKnownOp = token.startsWith("OP_") && OP_default[token] !== void 0;
+      const opCodeNum = isKnownOp ? OP_default[token] : 0;
+      if (opCodeNum === OP_default.OP_PUSHDATA1 || opCodeNum === OP_default.OP_PUSHDATA2 || opCodeNum === OP_default.OP_PUSHDATA4) {
+        return { chunk: { data: toArray2(tokens[i + 2], "hex"), op: opCodeNum }, advance: 3 };
+      }
+      if (!isKnownOp) {
+        let hex = token;
+        if (hex.length % 2 !== 0)
+          hex = "0" + hex;
+        const arr = toArray2(hex, "hex");
+        if (encode(arr, "hex") !== hex) {
+          throw new Error("invalid hex string in script");
+        }
+        return { chunk: { data: arr, op: _Script.pushdataOpCodeNum(arr.length) }, advance: 1 };
+      }
+      return { chunk: { op: opCodeNum }, advance: 1 };
     }
     /**
      * @method fromHex
@@ -10059,8 +10320,7 @@
       if (!/^[0-9a-fA-F]+$/.test(hex)) {
         throw new Error("Some elements in this string are not hex encoded.");
       }
-      const bin = toArray2(hex, "hex");
-      const rawBytes = Uint8Array.from(bin);
+      const rawBytes = hexToUint8Array(hex);
       return new _Script([], rawBytes, hex.toLowerCase(), false);
     }
     /**
@@ -10076,6 +10336,13 @@
       return new _Script([], rawBytes, void 0, false);
     }
     /**
+     * Constructs a lazily parsed script over an existing byte view without a copy.
+     * The caller must not mutate `bin` while the script is in use.
+     */
+    static fromBinaryView(bin) {
+      return new _Script([], bin, void 0, false);
+    }
+    /**
      * @constructor
      * Constructs a new Script object.
      * @param chunks=[] - An array of script chunks to directly initialize the script.
@@ -10089,6 +10356,11 @@
       this.rawBytesCache = rawBytesCache;
       this.hexCache = hexCache;
     }
+    /**
+     * Script chunks. Use the Script mutation methods or assign a replacement
+     * array through this property; mutating returned chunk objects in place
+     * bypasses serialization-cache invalidation.
+     */
     get chunks() {
       this.ensureParsed();
       return this._chunks;
@@ -10115,8 +10387,7 @@
      */
     toASM() {
       let str = "";
-      for (let i = 0; i < this.chunks.length; i++) {
-        const chunk = this.chunks[i];
+      for (const chunk of this.chunks) {
         str += this._chunkToString(chunk);
       }
       return str.slice(1);
@@ -10130,10 +10401,8 @@
       if (this.hexCache != null) {
         return this.hexCache;
       }
-      if (this.rawBytesCache == null) {
-        this.rawBytesCache = this.serializeChunksToBytes();
-      }
-      const hex = BufferCtor3 != null ? BufferCtor3.from(this.rawBytesCache).toString("hex") : encode(Array.from(this.rawBytesCache), "hex");
+      this.rawBytesCache ??= this.serializeChunksToBytes();
+      const hex = BufferCtor4 == null ? encode(Array.from(this.rawBytesCache), "hex") : BufferCtor4.from(this.rawBytesCache).toString("hex");
       this.hexCache = hex;
       return hex;
     }
@@ -10146,9 +10415,7 @@
       return Array.from(this.toUint8Array());
     }
     toUint8Array() {
-      if (this.rawBytesCache == null) {
-        this.rawBytesCache = this.serializeChunksToBytes();
-      }
+      this.rawBytesCache ??= this.serializeChunksToBytes();
       return this.rawBytesCache;
     }
     /**
@@ -10258,14 +10525,11 @@
      * @returns This script instance for chaining.
      */
     removeCodeseparators() {
-      this.invalidateSerializationCaches();
-      const chunks = [];
-      for (let i = 0; i < this.chunks.length; i++) {
-        if (this.chunks[i].op !== OP_default.OP_CODESEPARATOR) {
-          chunks.push(this.chunks[i]);
-        }
-      }
-      this.chunks = chunks;
+      const bytes2 = this.toUint8Array();
+      this.rawBytesCache = Uint8Array.from(_Script.removeOpcodeBytes(bytes2, OP_default.OP_CODESEPARATOR));
+      this.hexCache = void 0;
+      this._chunks = [];
+      this.parsed = false;
       return this;
     }
     /**
@@ -10278,82 +10542,10 @@
     findAndDelete(script) {
       this.invalidateSerializationCaches();
       const targetBytes = script.toUint8Array();
-      const targetLen = targetBytes.length;
-      if (targetLen === 0)
+      if (targetBytes.length === 0)
         return this;
-      const targetOp = targetBytes[0] ?? 0;
-      const matchesChunk = (chunk) => {
-        if (chunk.op !== targetOp)
-          return false;
-        const dataArr = chunk.data ?? [];
-        const dataLen = dataArr.length;
-        if (dataLen === 0) {
-          return targetLen === 1;
-        }
-        if (chunk.op === OP_default.OP_RETURN) {
-          if (targetLen !== 1 + dataLen)
-            return false;
-          for (let j = 0; j < dataLen; j++) {
-            if (targetBytes[1 + j] !== dataArr[j])
-              return false;
-          }
-          return true;
-        }
-        if (chunk.op < OP_default.OP_PUSHDATA1) {
-          if (targetLen !== 1 + dataLen)
-            return false;
-          for (let j = 0; j < dataLen; j++) {
-            if (targetBytes[1 + j] !== dataArr[j])
-              return false;
-          }
-          return true;
-        }
-        if (chunk.op === OP_default.OP_PUSHDATA1) {
-          if (targetLen !== 2 + dataLen)
-            return false;
-          if (targetBytes[1] !== (dataLen & 255))
-            return false;
-          for (let j = 0; j < dataLen; j++) {
-            if (targetBytes[2 + j] !== dataArr[j])
-              return false;
-          }
-          return true;
-        }
-        if (chunk.op === OP_default.OP_PUSHDATA2) {
-          if (targetLen !== 3 + dataLen)
-            return false;
-          if (targetBytes[1] !== (dataLen & 255))
-            return false;
-          if (targetBytes[2] !== (dataLen >> 8 & 255))
-            return false;
-          for (let j = 0; j < dataLen; j++) {
-            if (targetBytes[3 + j] !== dataArr[j])
-              return false;
-          }
-          return true;
-        }
-        if (chunk.op === OP_default.OP_PUSHDATA4) {
-          if (targetLen !== 5 + dataLen)
-            return false;
-          const size = dataLen >>> 0;
-          if (targetBytes[1] !== (size & 255))
-            return false;
-          if (targetBytes[2] !== (size >> 8 & 255))
-            return false;
-          if (targetBytes[3] !== (size >> 16 & 255))
-            return false;
-          if (targetBytes[4] !== (size >> 24 & 255))
-            return false;
-          for (let j = 0; j < dataLen; j++) {
-            if (targetBytes[5 + j] !== dataArr[j])
-              return false;
-          }
-          return true;
-        }
-        return false;
-      };
       for (let i = 0; i < this.chunks.length; ) {
-        if (matchesChunk(this.chunks[i])) {
+        if (chunkMatchesBytes(this.chunks[i], targetBytes)) {
           this.chunks.splice(i, 1);
         } else {
           i++;
@@ -10367,8 +10559,7 @@
      * @returns True if the script is push-only, otherwise false.
      */
     isPushOnly() {
-      for (let i = 0; i < this.chunks.length; i++) {
-        const chunk = this.chunks[i];
+      for (const chunk of this.chunks) {
         const opCodeNum = chunk.op;
         if (opCodeNum > OP_default.OP_16) {
           return false;
@@ -10427,14 +10618,12 @@
       const totalLength = _Script.computeSerializedLength(chunks);
       const bytes2 = new Uint8Array(totalLength);
       let offset = 0;
-      for (let i = 0; i < chunks.length; i++) {
-        const chunk = chunks[i];
+      for (const chunk of chunks) {
         bytes2[offset++] = chunk.op;
         if (chunk.data == null)
           continue;
         if (chunk.op === OP_default.OP_RETURN) {
           bytes2.set(chunk.data, offset);
-          offset += chunk.data.length;
           break;
         }
         offset = _Script.writeChunkData(bytes2, offset, chunk.op, chunk.data);
@@ -10470,6 +10659,28 @@
       }
       return offset;
     }
+    /**
+     * Reads pushdata length bytes from `bytes` at `pos` and returns the resulting
+     * `{ len, newPos, hasLength }` for a given opcode. Does not read the actual data.
+     */
+    static readPushdataLength(op, bytes2, pos, length) {
+      if (op > 0 && op < OP_default.OP_PUSHDATA1) {
+        return { len: op, newPos: pos, hasLength: true };
+      }
+      if (op === OP_default.OP_PUSHDATA1) {
+        const hasLength2 = pos < length;
+        const len2 = hasLength2 ? bytes2[pos++] ?? 0 : 0;
+        return { len: len2, newPos: pos, hasLength: hasLength2 };
+      }
+      if (op === OP_default.OP_PUSHDATA2) {
+        const hasLength2 = pos + 1 < length;
+        const len2 = (bytes2[pos] ?? 0) | (bytes2[pos + 1] ?? 0) << 8;
+        return { len: len2, newPos: Math.min(pos + 2, length), hasLength: hasLength2 };
+      }
+      const hasLength = pos + 3 < length;
+      const len = ((bytes2[pos] ?? 0) | (bytes2[pos + 1] ?? 0) << 8 | (bytes2[pos + 2] ?? 0) << 16 | (bytes2[pos + 3] ?? 0) << 24) >>> 0;
+      return { len, newPos: Math.min(pos + 4, length), hasLength };
+    }
     static parseChunks(bytes2) {
       const chunks = [];
       const length = bytes2.length;
@@ -10478,10 +10689,7 @@
       while (pos < length) {
         const op = bytes2[pos++] ?? 0;
         if (op === OP_default.OP_RETURN && inConditionalBlock === 0) {
-          chunks.push({
-            op,
-            data: _Script.copyRange(bytes2, pos, length)
-          });
+          chunks.push({ op, data: _Script.copyRange(bytes2, pos, length) });
           break;
         }
         if (op === OP_default.OP_IF || op === OP_default.OP_NOTIF || op === OP_default.OP_VERIF || op === OP_default.OP_VERNOTIF) {
@@ -10489,41 +10697,12 @@
         } else if (op === OP_default.OP_ENDIF) {
           inConditionalBlock--;
         }
-        if (op > 0 && op < OP_default.OP_PUSHDATA1) {
-          const len = op;
+        if (op > 0 && op <= OP_default.OP_PUSHDATA4) {
+          const { len, newPos, hasLength } = _Script.readPushdataLength(op, bytes2, pos, length);
+          pos = newPos;
           const end = Math.min(pos + len, length);
-          chunks.push({
-            data: _Script.copyRange(bytes2, pos, end),
-            op
-          });
-          pos = end;
-        } else if (op === OP_default.OP_PUSHDATA1) {
-          const len = pos < length ? bytes2[pos++] ?? 0 : 0;
-          const end = Math.min(pos + len, length);
-          chunks.push({
-            data: _Script.copyRange(bytes2, pos, end),
-            op
-          });
-          pos = end;
-        } else if (op === OP_default.OP_PUSHDATA2) {
-          const b0 = bytes2[pos] ?? 0;
-          const b1 = bytes2[pos + 1] ?? 0;
-          const len = b0 | b1 << 8;
-          pos = Math.min(pos + 2, length);
-          const end = Math.min(pos + len, length);
-          chunks.push({
-            data: _Script.copyRange(bytes2, pos, end),
-            op
-          });
-          pos = end;
-        } else if (op === OP_default.OP_PUSHDATA4) {
-          const len = ((bytes2[pos] ?? 0) | (bytes2[pos + 1] ?? 0) << 8 | (bytes2[pos + 2] ?? 0) << 16 | (bytes2[pos + 3] ?? 0) << 24) >>> 0;
-          pos = Math.min(pos + 4, length);
-          const end = Math.min(pos + len, length);
-          chunks.push({
-            data: _Script.copyRange(bytes2, pos, end),
-            op
-          });
+          const invalidLength = !hasLength || end - pos !== len;
+          chunks.push({ data: _Script.copyRange(bytes2, pos, end), op, invalidLength });
           pos = end;
         } else {
           chunks.push({ op });
@@ -10531,9 +10710,31 @@
       }
       return chunks;
     }
+    static removeOpcodeBytes(bytes2, opcode) {
+      const out = [];
+      const length = bytes2.length;
+      let pos = 0;
+      while (pos < length) {
+        const start = pos;
+        const op = bytes2[pos++] ?? 0;
+        if (op > 0 && op <= OP_default.OP_PUSHDATA4) {
+          const { len, newPos } = _Script.readPushdataLength(op, bytes2, pos, length);
+          pos = newPos;
+          const end = Math.min(pos + len, length);
+          if (op !== opcode) {
+            for (let i = start; i < end; i++)
+              out.push(bytes2[i] ?? 0);
+          }
+          pos = end;
+        } else if (op !== opcode) {
+          out.push(op);
+        }
+      }
+      return out;
+    }
     static copyRange(bytes2, start, end) {
       const size = Math.max(end - start, 0);
-      const data = new Array(size);
+      const data = Array.from({ length: size }, () => 0);
       for (let i = 0; i < size; i++) {
         data[i] = bytes2[start + i] ?? 0;
       }
@@ -10542,7 +10743,7 @@
     _chunkToString(chunk) {
       const op = chunk.op;
       let str = "";
-      if (typeof chunk.data === "undefined") {
+      if (chunk.data === void 0) {
         const val = OP_default[op];
         str = `${str} ${val}`;
       } else {
@@ -10554,6 +10755,103 @@
 
   // node_modules/@bsv/sdk/dist/esm/src/primitives/TransactionSignature.js
   var EMPTY_SCRIPT = new Uint8Array(0);
+  var ZERO_HASH = Object.freeze(Array.from({ length: 32 }, () => 0));
+  function bip143Inputs(params, currentInput) {
+    if (params.allInputs != null)
+      return params.allInputs;
+    const inputs = [...params.otherInputs];
+    inputs.splice(params.inputIndex, 0, currentInput);
+    return inputs;
+  }
+  function bip143InputAt(inputs, inputIndex, currentInput, index) {
+    return index === inputIndex ? currentInput : inputs[index];
+  }
+  function hashPrevouts(inputs, inputIndex, currentInput) {
+    const writer = new Writer();
+    for (let index = 0; index < inputs.length; index++) {
+      const input = bip143InputAt(inputs, inputIndex, currentInput, index);
+      if (input.sourceTXID == null) {
+        if (input.sourceTransaction == null)
+          throw new Error("Missing sourceTransaction for input");
+        writer.write(input.sourceTransaction.hash());
+      } else {
+        writer.writeReverse(toArray2(input.sourceTXID, "hex"));
+      }
+      writer.writeUInt32LE(input.sourceOutputIndex);
+    }
+    return hash256(writer.toUint8Array());
+  }
+  function hashSequences(inputs, inputIndex, currentInput) {
+    const writer = new Writer();
+    for (let index = 0; index < inputs.length; index++) {
+      const input = bip143InputAt(inputs, inputIndex, currentInput, index);
+      writer.writeUInt32LE(input.sequence ?? 4294967295);
+    }
+    return hash256(writer.toUint8Array());
+  }
+  function writeBip143Output(writer, output) {
+    writer.writeUInt64LE(output.satoshis ?? 0);
+    const script = output.lockingScript?.toUint8Array() ?? EMPTY_SCRIPT;
+    writer.writeVarIntNum(script.length);
+    writer.write(script);
+  }
+  function hashOutputs(outputs, outputIndex) {
+    const writer = new Writer();
+    if (outputIndex == null) {
+      for (const output of outputs)
+        writeBip143Output(writer, output);
+    } else {
+      const output = outputs[outputIndex];
+      if (output == null)
+        throw new Error(`Output at index ${outputIndex} does not exist`);
+      writeBip143Output(writer, output);
+    }
+    return hash256(writer.toUint8Array());
+  }
+  function bip143PrevoutsHash(params, inputs, currentInput) {
+    if ((params.scope & TransactionSignature.SIGHASH_ANYONECANPAY) !== 0)
+      return [...ZERO_HASH];
+    if (params.cache?.hashPrevouts != null)
+      return params.cache.hashPrevouts;
+    const hash = hashPrevouts(inputs, params.inputIndex, currentInput);
+    if (params.cache != null)
+      params.cache.hashPrevouts = hash;
+    return hash;
+  }
+  function bip143SequenceHash(params, inputs, currentInput) {
+    const baseScope = params.scope & 31;
+    if ((params.scope & TransactionSignature.SIGHASH_ANYONECANPAY) !== 0 || baseScope === TransactionSignature.SIGHASH_SINGLE || baseScope === TransactionSignature.SIGHASH_NONE)
+      return [...ZERO_HASH];
+    if (params.cache?.hashSequence != null)
+      return params.cache.hashSequence;
+    const hash = hashSequences(inputs, params.inputIndex, currentInput);
+    if (params.cache != null)
+      params.cache.hashSequence = hash;
+    return hash;
+  }
+  function bip143OutputsHash(params) {
+    const baseScope = params.scope & 31;
+    if (baseScope !== TransactionSignature.SIGHASH_SINGLE && baseScope !== TransactionSignature.SIGHASH_NONE) {
+      if (params.cache?.hashOutputsAll != null)
+        return params.cache.hashOutputsAll;
+      const hash2 = hashOutputs(params.outputs);
+      if (params.cache != null)
+        params.cache.hashOutputsAll = hash2;
+      return hash2;
+    }
+    if (baseScope !== TransactionSignature.SIGHASH_SINGLE || params.inputIndex >= params.outputs.length) {
+      return [...ZERO_HASH];
+    }
+    const cached = params.cache?.hashOutputsSingle?.get(params.inputIndex);
+    if (cached != null)
+      return cached;
+    const hash = hashOutputs(params.outputs, params.inputIndex);
+    if (params.cache != null) {
+      params.cache.hashOutputsSingle ??= /* @__PURE__ */ new Map();
+      params.cache.hashOutputsSingle.set(params.inputIndex, hash);
+    }
+    return hash;
+  }
   var TransactionSignature = class _TransactionSignature extends Signature {
     static SIGHASH_ALL = 1;
     static SIGHASH_NONE = 2;
@@ -10572,8 +10870,8 @@
       const isSingle = (params.scope & 31) === _TransactionSignature.SIGHASH_SINGLE;
       const isNone = (params.scope & 31) === _TransactionSignature.SIGHASH_NONE;
       const isAll = (params.scope & 31) === _TransactionSignature.SIGHASH_ALL || !isSingle && !isNone;
-      const subscript = new Script([...params.subscript.chunks]);
-      subscript.findAndDelete(new Script().writeOpCode(OP_default.OP_CODESEPARATOR));
+      const subscript = Script.fromBinary(params.subscript.toBinary());
+      subscript.removeCodeseparators();
       const currentInput = {
         sourceTXID: params.sourceTXID,
         sourceOutputIndex: params.sourceOutputIndex,
@@ -10602,14 +10900,19 @@
       writer.writeInt32LE(params.transactionVersion);
       const emptyScript = new Script().toBinary();
       if (!isAnyoneCanPay) {
-        const inputs = params.otherInputs.map((input) => ({
+        const inputs = params.allInputs == null ? params.otherInputs.map((input) => ({
           sourceTXID: input.sourceTXID ?? input.sourceTransaction?.id("hex") ?? "",
           sourceOutputIndex: input.sourceOutputIndex,
           sequence: isSingle || isNone ? 0 : input.sequence ?? 4294967295,
-          // Default to max sequence number
           script: emptyScript
-        }));
-        inputs.splice(params.inputIndex, 0, currentInput);
+        })) : params.allInputs.map((input, index) => index === params.inputIndex ? currentInput : {
+          sourceTXID: input.sourceTXID ?? input.sourceTransaction?.id("hex") ?? "",
+          sourceOutputIndex: input.sourceOutputIndex,
+          sequence: isSingle || isNone ? 0 : input.sequence ?? 4294967295,
+          script: emptyScript
+        });
+        if (params.allInputs == null)
+          inputs.splice(params.inputIndex, 0, currentInput);
         writeInputs(inputs);
       } else if (isAnyoneCanPay) {
         writeInputs([currentInput]);
@@ -10645,112 +10948,18 @@
      * @returns Bytes for signing.
      */
     static formatBip143(params) {
-      const cache = params.cache;
       const currentInput = {
         sourceTXID: params.sourceTXID,
         sourceOutputIndex: params.sourceOutputIndex,
         sequence: params.inputSequence
       };
-      const inputs = [...params.otherInputs];
-      inputs.splice(params.inputIndex, 0, currentInput);
-      const getPrevoutHash = () => {
-        const writer2 = new Writer();
-        for (const input of inputs) {
-          if (typeof input.sourceTXID === "undefined") {
-            if (input.sourceTransaction == null) {
-              throw new Error("Missing sourceTransaction for input");
-            }
-            writer2.write(input.sourceTransaction.hash());
-          } else {
-            writer2.writeReverse(toArray2(input.sourceTXID, "hex"));
-          }
-          writer2.writeUInt32LE(input.sourceOutputIndex);
-        }
-        const buf2 = writer2.toUint8Array();
-        const ret = hash256(buf2);
-        return ret;
-      };
-      const getSequenceHash = () => {
-        const writer2 = new Writer();
-        for (const input of inputs) {
-          const sequence = input.sequence ?? 4294967295;
-          writer2.writeUInt32LE(sequence);
-        }
-        const buf2 = writer2.toUint8Array();
-        const ret = hash256(buf2);
-        return ret;
-      };
-      function getOutputsHash(outputIndex) {
-        const writer2 = new Writer();
-        if (typeof outputIndex === "undefined") {
-          for (const output of params.outputs) {
-            const satoshis = output.satoshis ?? 0;
-            writer2.writeUInt64LE(satoshis);
-            const script = output.lockingScript?.toUint8Array() ?? EMPTY_SCRIPT;
-            writer2.writeVarIntNum(script.length);
-            writer2.write(script);
-          }
-        } else {
-          const output = params.outputs[outputIndex];
-          if (output === void 0) {
-            throw new Error(`Output at index ${outputIndex} does not exist`);
-          }
-          const satoshis = output.satoshis ?? 0;
-          writer2.writeUInt64LE(satoshis);
-          const script = output.lockingScript?.toUint8Array() ?? EMPTY_SCRIPT;
-          writer2.writeVarIntNum(script.length);
-          writer2.write(script);
-        }
-        const buf2 = writer2.toUint8Array();
-        const ret = hash256(buf2);
-        return ret;
-      }
-      let hashPrevouts = new Array(32).fill(0);
-      let hashSequence = new Array(32).fill(0);
-      let hashOutputs = new Array(32).fill(0);
-      if ((params.scope & _TransactionSignature.SIGHASH_ANYONECANPAY) === 0) {
-        if (cache?.hashPrevouts != null) {
-          hashPrevouts = cache.hashPrevouts;
-        } else {
-          hashPrevouts = getPrevoutHash();
-          if (cache != null)
-            cache.hashPrevouts = hashPrevouts;
-        }
-      }
-      if ((params.scope & _TransactionSignature.SIGHASH_ANYONECANPAY) === 0 && (params.scope & 31) !== _TransactionSignature.SIGHASH_SINGLE && (params.scope & 31) !== _TransactionSignature.SIGHASH_NONE) {
-        if (cache?.hashSequence != null) {
-          hashSequence = cache.hashSequence;
-        } else {
-          hashSequence = getSequenceHash();
-          if (cache != null)
-            cache.hashSequence = hashSequence;
-        }
-      }
-      if ((params.scope & 31) !== _TransactionSignature.SIGHASH_SINGLE && (params.scope & 31) !== _TransactionSignature.SIGHASH_NONE) {
-        if (cache?.hashOutputsAll != null) {
-          hashOutputs = cache.hashOutputsAll;
-        } else {
-          hashOutputs = getOutputsHash();
-          if (cache != null)
-            cache.hashOutputsAll = hashOutputs;
-        }
-      } else if ((params.scope & 31) === _TransactionSignature.SIGHASH_SINGLE && params.inputIndex < params.outputs.length) {
-        const key = params.inputIndex;
-        const cachedSingle = cache?.hashOutputsSingle?.get(key);
-        if (cachedSingle != null) {
-          hashOutputs = cachedSingle;
-        } else {
-          hashOutputs = getOutputsHash(key);
-          if (cache != null) {
-            if (cache.hashOutputsSingle == null)
-              cache.hashOutputsSingle = /* @__PURE__ */ new Map();
-            cache.hashOutputsSingle.set(key, hashOutputs);
-          }
-        }
-      }
+      const inputs = bip143Inputs(params, currentInput);
+      const hashPrevouts2 = bip143PrevoutsHash(params, inputs, currentInput);
+      const hashSequence = bip143SequenceHash(params, inputs, currentInput);
+      const outputsHash = bip143OutputsHash(params);
       const writer = new Writer();
       writer.writeInt32LE(params.transactionVersion);
-      writer.write(hashPrevouts);
+      writer.write(hashPrevouts2);
       writer.write(hashSequence);
       writer.writeReverse(toArray2(params.sourceTXID, "hex"));
       writer.writeUInt32LE(params.sourceOutputIndex);
@@ -10758,9 +10967,9 @@
       writer.writeVarIntNum(subscriptBin.length);
       writer.write(subscriptBin);
       writer.writeUInt64LE(params.sourceSatoshis);
-      const sequenceNumber = currentInput.sequence;
+      const sequenceNumber = currentInput.sequence ?? 4294967295;
       writer.writeUInt32LE(sequenceNumber);
-      writer.write(hashOutputs);
+      writer.write(outputsHash);
       writer.writeUInt32LE(params.lockTime);
       writer.writeUInt32LE(params.scope >>> 0);
       const buf = writer.toUint8Array();
@@ -10785,6 +10994,12 @@
       }
       return new Uint8Array(0);
     }
+    static usesOtdaSingleBug(params) {
+      const hasForkId = (params.scope & _TransactionSignature.SIGHASH_FORKID) !== 0;
+      const hasChronicle = params.ignoreChronicle !== true && (params.scope & _TransactionSignature.SIGHASH_CHRONICLE) !== 0;
+      const usesOtda = !hasForkId || hasForkId && hasChronicle;
+      return usesOtda && (params.scope & 31) === _TransactionSignature.SIGHASH_SINGLE && params.inputIndex >= params.outputs.length;
+    }
     // The format used in a tx
     static fromChecksigFormat(buf) {
       if (buf.length === 0) {
@@ -10793,8 +11008,8 @@
         const scope2 = 1;
         return new _TransactionSignature(r2, s2, scope2);
       }
-      const scope = buf[buf.length - 1];
-      const derbuf = buf.slice(0, buf.length - 1);
+      const scope = buf.at(-1);
+      const derbuf = buf.slice(0, -1);
       const tempSig = Signature.fromDER(derbuf);
       return new _TransactionSignature(tempSig.r, tempSig.s, scope);
     }
@@ -10849,25 +11064,25 @@
      * @param proof Proof (R, S', z)
      * @returns True if the proof is valid, false otherwise
      */
-    verifyProof(A2, B2, S, proof) {
+    verifyProof(A, B, S, proof) {
       const { R: R2, SPrime, z } = proof;
-      const e = this.computeChallenge(A2, B2, S, SPrime, R2);
+      const e = this.computeChallenge(A, B, S, SPrime, R2);
       const zG = this.curve.g.mul(z);
-      const RpluseA = R2.add(A2.mul(e));
+      const RpluseA = R2.add(A.mul(e));
       if (!zG.eq(RpluseA)) {
         return false;
       }
-      const zB = B2.mul(z);
+      const zB = B.mul(z);
       const SprimeeS = SPrime.add(S.mul(e));
       if (!zB.eq(SprimeeS)) {
         return false;
       }
       return true;
     }
-    computeChallenge(A2, B2, S, SPrime, R2) {
+    computeChallenge(A, B, S, SPrime, R2) {
       const message = [
-        ...A2.encode(true),
-        ...B2.encode(true),
+        ...A.encode(true),
+        ...B.encode(true),
         ...S.encode(true),
         ...SPrime.encode(true),
         ...R2.encode(true)
@@ -10877,14 +11092,33 @@
     }
   };
 
-  // node_modules/@bsv/sdk/dist/esm/src/primitives/Secp256r1.js
-  var P = BigInt("0xffffffff00000001000000000000000000000000ffffffffffffffffffffffff");
-  var N = BigInt("0xffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551");
-  var A = P - 3n;
-  var B = BigInt("0x5ac635d8aa3a93e7b3ebbd55769886bc651d06b0cc53b0f63bce3c3e27d2604b");
-  var GX = BigInt("0x6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296");
-  var GY = BigInt("0x4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5");
-  var HALF_N = N >> 1n;
+  // node_modules/@bsv/sdk/dist/esm/src/primitives/AsyncCryptoBackend.js
+  function isAsyncCryptoDigest(digest) {
+    return digest.length === 32 && digest.every((byte) => Number.isInteger(byte) && byte >= 0 && byte <= 255);
+  }
+  function validateAsyncCryptoBytes(operation, value, expectedLength) {
+    if (!(value instanceof Uint8Array)) {
+      throw new TypeError(`${operation} returned a non-byte result`);
+    }
+    if (expectedLength !== void 0 && value.length !== expectedLength) {
+      throw new Error(`${operation} returned ${value.length} bytes; expected ${expectedLength}`);
+    }
+    return value;
+  }
+  function backendGlobal() {
+    return globalThis;
+  }
+  function readyAsyncCryptoBackend(operation) {
+    const backend = backendGlobal().__bsvSdkAsyncCryptoBackendV1;
+    if (backend === void 0)
+      return void 0;
+    if (!backend.isReady()) {
+      void backend.preload().catch(() => {
+      });
+      return void 0;
+    }
+    return backend.supportsCrypto(operation) ? backend : void 0;
+  }
 
   // node_modules/@bsv/sdk/dist/esm/src/script/LockingScript.js
   var LockingScript = class extends Script {
@@ -10927,6 +11161,13 @@
   };
 
   // node_modules/@bsv/sdk/dist/esm/src/script/ScriptEvaluationError.js
+  function formatStackItem(item) {
+    if (item == null)
+      return "null/undef";
+    if (item.length === void 0)
+      return "INVALID_STACK_ITEM";
+    return toHex(item);
+  }
   var ScriptEvaluationError = class extends Error {
     txid;
     outputIndex;
@@ -10938,8 +11179,8 @@
     stackMem;
     altStackMem;
     constructor(params) {
-      const stackHex = params.stackState.map((s2) => s2 != null && typeof s2.length !== "undefined" ? toHex(s2) : s2 === null || s2 === void 0 ? "null/undef" : "INVALID_STACK_ITEM").join(", ");
-      const altStackHex = params.altStackState.map((s2) => s2 != null && typeof s2.length !== "undefined" ? toHex(s2) : s2 === null || s2 === void 0 ? "null/undef" : "INVALID_STACK_ITEM").join(", ");
+      const stackHex = params.stackState.map(formatStackItem).join(", ");
+      const altStackHex = params.altStackState.map(formatStackItem).join(", ");
       const pcInfo = `Context: ${params.context}, PC: ${params.programCounter}`;
       const stackInfo = `Stack: [${stackHex}] (len: ${params.stackState.length}, mem: ${params.stackMem})`;
       const altStackInfo = `AltStack: [${altStackHex}] (len: ${params.altStackState.length}, mem: ${params.altStackMem})`;
@@ -10964,10 +11205,44 @@ ${ifStackInfo}`;
     }
   };
 
+  // node_modules/@bsv/sdk/dist/esm/src/script/ScriptResourceLimitError.js
+  var ScriptResourceLimitError = class extends Error {
+    resource;
+    limit;
+    attempted;
+    constructor(resource, limit, attempted) {
+      const labels = {
+        stack: "Stack memory usage",
+        "alt-stack": "Alt stack memory usage",
+        "element-size": "Script element allocation"
+      };
+      const label = labels[resource];
+      super(`${label} has exceeded ${limit} bytes`);
+      this.resource = resource;
+      this.limit = limit;
+      this.attempted = attempted;
+      this.name = "ScriptResourceLimitError";
+    }
+  };
+
+  // node_modules/@bsv/sdk/dist/esm/src/transaction/ScriptVerificationBackend.js
+  function backendGlobal2() {
+    return globalThis;
+  }
+  function scriptVerificationBackend() {
+    return backendGlobal2().__bsvSdkScriptVerificationBackendV1;
+  }
+
   // node_modules/@bsv/sdk/dist/esm/src/script/Spend.js
-  var maxScriptElementSize = 1024 * 1024 * 1024;
+  var maxScriptElementSizeBeforeGenesis = 520;
+  var maxScriptSizeBeforeGenesis = 1e4;
+  var maxOpsBeforeGenesis = 500;
+  var maxJavaScriptArrayLength = 0xffffffffn;
+  var maxStackItemsBeforeGenesis = 1e3;
   var maxMultisigKeyCount = Math.pow(2, 31) - 1;
   var maxMultisigKeyCountBigInt = BigInt(maxMultisigKeyCount);
+  var maxMultisigKeyCountBeforeGenesis = 20;
+  var sequenceLocktimeDisableFlag = 2147483648;
   var SCRIPTNUM_NEG_1 = Object.freeze(new BigNumber(-1).toScriptNum());
   var SCRIPTNUMS_0_TO_16 = Object.freeze(Array.from({ length: 17 }, (_, i) => Object.freeze(new BigNumber(i).toScriptNum())));
   function compareNumberArrays(a, b) {
@@ -10979,13 +11254,28 @@ ${ifStackInfo}`;
     }
     return true;
   }
+  function scriptBoolean(value) {
+    return new BigNumber(value ? 1 : 0);
+  }
+  function scriptBooleanAnd(left, right) {
+    return scriptBoolean(left && right);
+  }
+  function scriptBooleanOr(left, right) {
+    return scriptBoolean(left || right);
+  }
+  function smallerBigNumber(left, right) {
+    return left.cmp(right) < 0 ? left : right;
+  }
+  function largerBigNumber(left, right) {
+    return left.cmp(right) > 0 ? left : right;
+  }
   function isMinimallyEncodedHelper(buf, maxNumSize = Number.MAX_SAFE_INTEGER) {
     if (buf.length > maxNumSize) {
       return false;
     }
     if (buf.length > 0) {
-      if ((buf[buf.length - 1] & 127) === 0) {
-        if (buf.length <= 1 || (buf[buf.length - 2] & 128) === 0) {
+      if ((buf.at(-1) & 127) === 0) {
+        if (buf.length <= 1 || (buf.at(-2) & 128) === 0) {
           return false;
         }
       }
@@ -11053,6 +11343,7 @@ ${ifStackInfo}`;
     lockingScript;
     transactionVersion;
     otherInputs;
+    allInputs;
     outputs;
     inputIndex;
     unlockingScript;
@@ -11064,11 +11355,17 @@ ${ifStackInfo}`;
     stack;
     altStack;
     ifStack;
+    elseStack;
     memoryLimit;
+    hasExplicitMemoryLimit;
     stackMem;
     altStackMem;
     isRelaxedOverride;
+    verifyFlags;
+    executedOpCount;
+    returningFromConditional;
     sigHashCache;
+    ownsSigHashCache;
     /**
      * @constructor
      * Constructs the Spend object with necessary transaction details.
@@ -11085,7 +11382,9 @@ ${ifStackInfo}`;
      * @param {UnlockingScript} params.unlockingScript - The unlocking script for this spend.
      * @param {number} params.inputSequence - The sequence number of this input.
      * @param {number} params.lockTime - The lock time of the transaction.
-     * @param {number} params.memoryLimit - Optional control over script interpreter memory usage.
+     * @param {number} params.memoryLimit - Optional caller-supplied local
+     *        interpreter budget. Resource exhaustion is reported separately from
+     *        script invalidity.
      * @param {boolean} params.isRelaxed - Optional. If true, disables all the unlocking script maleability restrictions consitent with Chronicle release. Maleability restrictions are neve appliced to locking scripts.
      *
      * @example
@@ -11110,43 +11409,127 @@ ${ifStackInfo}`;
       this.lockingScript = params.lockingScript;
       this.transactionVersion = params.transactionVersion;
       this.otherInputs = params.otherInputs;
+      this.allInputs = params.allInputs;
       this.outputs = params.outputs;
       this.inputIndex = params.inputIndex;
       this.unlockingScript = params.unlockingScript;
       this.inputSequence = params.inputSequence;
       this.lockTime = params.lockTime;
-      this.memoryLimit = params.memoryLimit ?? 32e6;
+      this.hasExplicitMemoryLimit = params.memoryLimit !== void 0;
+      this.memoryLimit = params.memoryLimit ?? Number.POSITIVE_INFINITY;
       this.isRelaxedOverride = params.isRelaxed === true;
+      if (params.verifyFlags === void 0) {
+        this.verifyFlags = void 0;
+      } else {
+        const flagArr = Array.isArray(params.verifyFlags) ? params.verifyFlags : params.verifyFlags.split(",");
+        this.verifyFlags = new Set(flagArr.map((flag) => flag.trim()).filter((flag) => flag.length > 0));
+      }
       this.stack = [];
       this.altStack = [];
       this.ifStack = [];
+      this.elseStack = [];
       this.stackMem = 0;
       this.altStackMem = 0;
-      this.sigHashCache = { hashOutputsSingle: /* @__PURE__ */ new Map() };
+      this.executedOpCount = 0;
+      this.returningFromConditional = false;
+      this.ownsSigHashCache = params.sigHashCache == null;
+      this.sigHashCache = params.sigHashCache ?? { hashOutputsSingle: /* @__PURE__ */ new Map() };
       this.reset();
     }
     isRelaxed() {
       return this.isRelaxedOverride || this.transactionVersion > 1;
     }
+    hasExplicitFlags() {
+      return this.verifyFlags !== void 0;
+    }
+    hasFlag(flag) {
+      return this.verifyFlags?.has(flag) === true;
+    }
+    isAfterGenesis() {
+      if (this.hasExplicitFlags()) {
+        return this.hasFlag("GENESIS") || this.hasFlag("UTXO_AFTER_GENESIS") || this.hasFlag("UTXO_AFTER_CHRONICLE");
+      }
+      return this.isRelaxed();
+    }
+    isAfterChronicle() {
+      if (this.hasExplicitFlags())
+        return this.hasFlag("UTXO_AFTER_CHRONICLE");
+      return this.isRelaxed();
+    }
+    shouldEnforceMinimalData() {
+      if (this.hasExplicitFlags())
+        return this.hasFlag("MINIMALDATA");
+      return !this.isRelaxed();
+    }
+    shouldEnforceLowS() {
+      if (this.hasExplicitFlags())
+        return this.hasFlag("LOW_S");
+      return !this.isRelaxed();
+    }
+    shouldEnforceNullDummy() {
+      if (this.hasExplicitFlags())
+        return this.hasFlag("NULLDUMMY");
+      return !this.isRelaxed();
+    }
+    shouldEnforceSigPushOnly() {
+      if (this.hasExplicitFlags())
+        return this.hasFlag("SIGPUSHONLY");
+      return !this.isRelaxed();
+    }
+    shouldEnforceCleanStack() {
+      if (this.hasExplicitFlags())
+        return this.hasFlag("CLEANSTACK");
+      return !this.isRelaxed();
+    }
+    shouldEnforceDerSignatures() {
+      if (this.hasExplicitFlags()) {
+        return this.hasFlag("DERSIG") || this.hasFlag("STRICTENC") || this.hasFlag("LOW_S") || this.hasFlag("SIGHASH_FORKID");
+      }
+      return true;
+    }
+    shouldEnforceStrictEncoding() {
+      if (this.hasExplicitFlags()) {
+        return this.hasFlag("STRICTENC") || this.hasFlag("SIGHASH_FORKID");
+      }
+      return true;
+    }
+    scriptNumMaxSize() {
+      if (this.hasExplicitFlags() && !this.isAfterGenesis())
+        return 4;
+      return void 0;
+    }
+    maxPushSize() {
+      if (this.hasExplicitFlags() && !this.isAfterGenesis())
+        return maxScriptElementSizeBeforeGenesis;
+      return Number.POSITIVE_INFINITY;
+    }
     reset() {
+      if (this.ownsSigHashCache) {
+        delete this.sigHashCache.hashPrevouts;
+        delete this.sigHashCache.hashSequence;
+        delete this.sigHashCache.hashOutputsAll;
+        this.sigHashCache.hashOutputsSingle?.clear();
+      }
       this.context = "UnlockingScript";
       this.programCounter = 0;
       this.lastCodeSeparator = null;
       this.stack = [];
       this.altStack = [];
       this.ifStack = [];
+      this.elseStack = [];
       this.stackMem = 0;
       this.altStackMem = 0;
-      this.sigHashCache = { hashOutputsSingle: /* @__PURE__ */ new Map() };
+      this.executedOpCount = 0;
+      this.returningFromConditional = false;
     }
     ensureStackMem(additional) {
       if (this.stackMem + additional > this.memoryLimit) {
-        this.scriptEvaluationError("Stack memory usage has exceeded " + String(this.memoryLimit) + " bytes");
+        throw new ScriptResourceLimitError("stack", this.memoryLimit, this.stackMem + additional);
       }
     }
     ensureAltStackMem(additional) {
       if (this.altStackMem + additional > this.memoryLimit) {
-        this.scriptEvaluationError("Alt stack memory usage has exceeded " + String(this.memoryLimit) + " bytes");
+        throw new ScriptResourceLimitError("alt-stack", this.memoryLimit, this.altStackMem + additional);
       }
     }
     pushStack(item) {
@@ -11178,6 +11561,22 @@ ${ifStackInfo}`;
       }
       return this.stack[this.stack.length + index];
     }
+    requireStackItems(minimum, message) {
+      if (this.stack.length < minimum)
+        this.scriptEvaluationError(message);
+    }
+    requireAltStackItems(minimum, message) {
+      if (this.altStack.length < minimum)
+        this.scriptEvaluationError(message);
+    }
+    setStack(items) {
+      this.stack = items.map((item) => item.slice());
+      this.stackMem = this.stack.reduce((total, item) => total + item.length, 0);
+    }
+    clearAltStack() {
+      this.altStack = [];
+      this.altStackMem = 0;
+    }
     pushAltStack(item) {
       this.ensureAltStackMem(item.length);
       this.altStack.push(item);
@@ -11195,26 +11594,123 @@ ${ifStackInfo}`;
       this.altStackMem -= item.length;
       return item;
     }
+    readScriptNumber(buf) {
+      try {
+        return BigNumber.fromScriptNum(buf, this.shouldEnforceMinimalData(), this.scriptNumMaxSize());
+      } catch (e) {
+        const message = e instanceof Error ? e.message : String(e);
+        this.scriptEvaluationError(message);
+      }
+      return new BigNumber(0);
+    }
+    isDefinedHashType(scope) {
+      const baseType = scope & 31;
+      return baseType >= TransactionSignature.SIGHASH_ALL && baseType <= TransactionSignature.SIGHASH_SINGLE;
+    }
+    enforceSignatureHashType(sig) {
+      if (!this.shouldEnforceStrictEncoding())
+        return;
+      if (!this.isDefinedHashType(sig.scope)) {
+        this.scriptEvaluationError("The signature hash type is invalid.");
+      }
+      const usesChronicle = (sig.scope & TransactionSignature.SIGHASH_CHRONICLE) !== 0;
+      if (usesChronicle && !this.isAfterChronicle()) {
+        this.scriptEvaluationError("The signature hash type is invalid before Chronicle.");
+      }
+    }
+    enforceSignatureForkId(sig) {
+      if (!this.hasExplicitFlags())
+        return;
+      const hasForkId = (sig.scope & TransactionSignature.SIGHASH_FORKID) !== 0;
+      if (this.hasFlag("SIGHASH_FORKID") && !hasForkId) {
+        this.scriptEvaluationError("The signature must use SIGHASH_FORKID.");
+      }
+      if (!this.hasFlag("SIGHASH_FORKID") && !this.isAfterGenesis() && hasForkId) {
+        this.scriptEvaluationError("The signature must not use SIGHASH_FORKID.");
+      }
+    }
     checkSignatureEncoding(buf) {
       if (buf.length === 0)
         return true;
-      if (!isChecksigFormatHelper(buf)) {
+      const enforceDer = this.shouldEnforceDerSignatures();
+      if (enforceDer && !isChecksigFormatHelper(buf)) {
         this.scriptEvaluationError("The signature format is invalid.");
         return false;
       }
       try {
         const sig = TransactionSignature.fromChecksigFormat(buf);
-        if (!this.isRelaxed() && !sig.hasLowS()) {
+        this.enforceSignatureHashType(sig);
+        this.enforceSignatureForkId(sig);
+        if (this.shouldEnforceLowS() && !sig.hasLowS()) {
           this.scriptEvaluationError("The signature must have a low S value.");
           return false;
         }
       } catch {
-        this.scriptEvaluationError("The signature format is invalid.");
-        return false;
+        if (enforceDer) {
+          this.scriptEvaluationError("The signature format is invalid.");
+          return false;
+        }
       }
       return true;
     }
+    parseChecksigSignature(buf) {
+      try {
+        return TransactionSignature.fromChecksigFormat(buf);
+      } catch (e) {
+        if (this.shouldEnforceDerSignatures())
+          throw e;
+        return this.parseLaxChecksigSignature(buf);
+      }
+    }
+    readLaxDERLength(buf, position) {
+      const first = buf[position.value++];
+      if (first === void 0)
+        throw new Error("Invalid DER length");
+      if ((first & 128) === 0)
+        return first;
+      const lengthBytes = first & 127;
+      if (lengthBytes === 0 || position.value + lengthBytes > buf.length) {
+        throw new Error("Invalid DER length");
+      }
+      let length = 0;
+      for (let i = 0; i < lengthBytes; i++) {
+        length = length << 8 | (buf[position.value++] ?? 0);
+      }
+      return length;
+    }
+    parseLaxDERInteger(buf, position, sequenceEnd) {
+      if (position.value >= sequenceEnd || buf[position.value++] !== 2) {
+        throw new Error("Invalid DER integer");
+      }
+      const length = this.readLaxDERLength(buf, position);
+      if (position.value + length > sequenceEnd) {
+        throw new Error("Invalid DER integer length");
+      }
+      let bytes2 = buf.slice(position.value, position.value + length);
+      position.value += length;
+      while (bytes2.length > 1 && bytes2[0] === 0)
+        bytes2 = bytes2.slice(1);
+      if (bytes2.length === 0)
+        bytes2 = [0];
+      return new BigNumber(bytes2);
+    }
+    parseLaxChecksigSignature(buf) {
+      if (buf.length === 0)
+        return TransactionSignature.fromChecksigFormat(buf);
+      const scope = buf.at(-1);
+      const der = buf.slice(0, -1);
+      const position = { value: 0 };
+      if (der[position.value++] !== 48)
+        throw new Error("Signature DER must start with 0x30");
+      const sequenceLength = this.readLaxDERLength(der, position);
+      const sequenceEnd = Math.min(position.value + sequenceLength, der.length);
+      const r2 = this.parseLaxDERInteger(der, position, sequenceEnd);
+      const s2 = this.parseLaxDERInteger(der, position, sequenceEnd);
+      return new TransactionSignature(r2, s2, scope);
+    }
     checkPublicKeyEncoding(buf) {
+      if (!this.shouldEnforceStrictEncoding())
+        return true;
       if (buf.length === 0) {
         this.scriptEvaluationError("Public key is empty.");
         return false;
@@ -11246,12 +11742,13 @@ ${ifStackInfo}`;
       return true;
     }
     verifySignature(sig, pubkey, subscript) {
-      const preimage = TransactionSignature.formatBytes({
+      const params = {
         sourceTXID: this.sourceTXID,
         sourceOutputIndex: this.sourceOutputIndex,
         sourceSatoshis: this.sourceSatoshis,
         transactionVersion: this.transactionVersion,
         otherInputs: this.otherInputs,
+        allInputs: this.allInputs,
         outputs: this.outputs,
         inputIndex: this.inputIndex,
         subscript,
@@ -11259,41 +11756,115 @@ ${ifStackInfo}`;
         lockTime: this.lockTime,
         scope: sig.scope,
         cache: this.sigHashCache
-      });
-      const hash = new BigNumber(hash256(preimage));
+      };
+      const hash = TransactionSignature.usesOtdaSingleBug(params) ? new BigNumber([1, ...Array.from({ length: 31 }, () => 0)]) : new BigNumber(hash256(TransactionSignature.formatBytes(params)));
       return verify(hash, sig, pubkey);
     }
-    step() {
+    enforceStepResourceLimits() {
       if (this.stackMem > this.memoryLimit) {
-        this.scriptEvaluationError("Stack memory usage has exceeded " + String(this.memoryLimit) + " bytes");
-        return false;
+        throw new ScriptResourceLimitError("stack", this.memoryLimit, this.stackMem);
       }
       if (this.altStackMem > this.memoryLimit) {
-        this.scriptEvaluationError("Alt stack memory usage has exceeded " + String(this.memoryLimit) + " bytes");
-        return false;
+        throw new ScriptResourceLimitError("alt-stack", this.memoryLimit, this.altStackMem);
       }
+    }
+    currentScriptForStep() {
       if (this.context === "UnlockingScript" && this.programCounter >= this.unlockingScript.chunks.length) {
+        if (this.ifStack.length > 0) {
+          this.scriptEvaluationError("Every OP_IF, OP_NOTIF, or OP_ELSE must be terminated with OP_ENDIF prior to the end of the unlocking script.");
+        }
+        this.clearAltStack();
+        this.ifStack = [];
+        this.elseStack = [];
+        this.returningFromConditional = false;
+        this.lastCodeSeparator = null;
         this.context = "LockingScript";
         this.programCounter = 0;
       }
-      const currentScript = this.context === "UnlockingScript" ? this.unlockingScript : this.lockingScript;
+      return this.context === "UnlockingScript" ? this.unlockingScript : this.lockingScript;
+    }
+    opcodeForOperation(operation) {
+      const currentOpcode = operation.op;
+      if (currentOpcode === void 0) {
+        this.scriptEvaluationError(`Missing opcode in ${this.context} at pc=${this.programCounter}.`);
+        return 0;
+      }
+      if (operation.invalidLength === true) {
+        this.scriptEvaluationError(`Malformed push data in ${this.context} at pc=${this.programCounter}.`);
+      }
+      if (Array.isArray(operation.data) && operation.data.length > this.maxPushSize()) {
+        this.scriptEvaluationError(`Data push > ${this.maxPushSize()} bytes (pc=${this.programCounter}).`);
+      }
+      return currentOpcode;
+    }
+    enforceChronicleOnlyOpcode(currentOpcode) {
+      if (this.hasExplicitFlags() && !this.isAfterGenesis() && !this.isAfterChronicle() && (currentOpcode === OP_default.OP_2MUL || currentOpcode === OP_default.OP_2DIV || currentOpcode === OP_default.OP_VERIF || currentOpcode === OP_default.OP_VERNOTIF)) {
+        this.scriptEvaluationError(`${OP_default[currentOpcode]} is disabled until Chronicle.`);
+      }
+    }
+    executeDataPush(operation) {
+      if (this.shouldEnforceMinimalData() && !isChunkMinimalPushHelper(operation)) {
+        this.scriptEvaluationError(`This data is not minimally-encoded. (PC: ${this.programCounter})`);
+      }
+      this.pushStack(Array.isArray(operation.data) ? operation.data : []);
+    }
+    countExecutedOpcode(currentOpcode, isScriptExecuting) {
+      if (!isScriptExecuting || currentOpcode <= OP_default.OP_16)
+        return;
+      this.executedOpCount++;
+      if (this.hasExplicitFlags() && !this.isAfterGenesis() && this.executedOpCount > maxOpsBeforeGenesis) {
+        this.scriptEvaluationError(`Script executed more than ${maxOpsBeforeGenesis} opcodes.`);
+      }
+    }
+    skipUnavailablePreChronicleOpcode(currentOpcode, isScriptExecuting) {
+      if (!this.hasExplicitFlags() || this.isAfterChronicle())
+        return false;
+      if (isScriptExecuting && (currentOpcode === OP_default.OP_SUBSTR || currentOpcode === OP_default.OP_LEFT || currentOpcode === OP_default.OP_RIGHT || currentOpcode === OP_default.OP_LSHIFTNUM || currentOpcode === OP_default.OP_RSHIFTNUM)) {
+        if (this.hasFlag("DISCOURAGE_UPGRADABLE_NOPS")) {
+          this.scriptEvaluationError(`${OP_default[currentOpcode]} is discouraged by verification flags.`);
+        }
+        this.programCounter++;
+        return true;
+      }
+      if ((isScriptExecuting || !this.isAfterGenesis()) && (currentOpcode === OP_default.OP_2MUL || currentOpcode === OP_default.OP_2DIV)) {
+        this.scriptEvaluationError(`${OP_default[currentOpcode]} is disabled until Chronicle.`);
+      }
+      if ((isScriptExecuting || !this.isAfterGenesis()) && (currentOpcode === OP_default.OP_VER || currentOpcode === OP_default.OP_VERIF || currentOpcode === OP_default.OP_VERNOTIF)) {
+        this.scriptEvaluationError(`${OP_default[currentOpcode]} is disabled until Chronicle.`);
+      }
+      if (!isScriptExecuting && this.isAfterGenesis() && (currentOpcode === OP_default.OP_VERIF || currentOpcode === OP_default.OP_VERNOTIF)) {
+        this.programCounter++;
+        return true;
+      }
+      return false;
+    }
+    enforceDiscouragedNop(currentOpcode, isScriptExecuting) {
+      if (isScriptExecuting && this.hasFlag("DISCOURAGE_UPGRADABLE_NOPS") && (currentOpcode === OP_default.OP_NOP1 || currentOpcode === OP_default.OP_CHECKLOCKTIMEVERIFY || currentOpcode === OP_default.OP_CHECKSEQUENCEVERIFY || currentOpcode === OP_default.OP_NOP9 || currentOpcode === OP_default.OP_NOP10)) {
+        this.scriptEvaluationError(`${OP_default[currentOpcode]} is discouraged by verification flags.`);
+      }
+    }
+    advanceAfterStep(currentScript) {
+      if (this.returningFromConditional && this.ifStack.length === 0) {
+        this.programCounter = currentScript.chunks.length;
+      } else {
+        this.programCounter++;
+      }
+      if (this.hasExplicitFlags() && !this.isAfterGenesis() && this.stack.length + this.altStack.length > maxStackItemsBeforeGenesis) {
+        this.scriptEvaluationError(`Stack item count has exceeded ${maxStackItemsBeforeGenesis}.`);
+      }
+    }
+    step() {
+      this.enforceStepResourceLimits();
+      const currentScript = this.currentScriptForStep();
       if (this.programCounter >= currentScript.chunks.length) {
         return false;
       }
       const operation = currentScript.chunks[this.programCounter];
-      const currentOpcode = operation.op;
-      if (currentOpcode === void 0) {
-        this.scriptEvaluationError(`Missing opcode in ${this.context} at pc=${this.programCounter}.`);
-      }
-      if (Array.isArray(operation.data) && operation.data.length > maxScriptElementSize) {
-        this.scriptEvaluationError(`Data push > ${maxScriptElementSize} bytes (pc=${this.programCounter}).`);
-      }
-      const isScriptExecuting = !this.ifStack.includes(false);
+      const currentOpcode = this.opcodeForOperation(operation);
+      const isScriptExecuting = !this.returningFromConditional && !this.ifStack.includes(false);
+      this.enforceChronicleOnlyOpcode(currentOpcode);
       if (isScriptExecuting && currentOpcode >= 0 && currentOpcode <= OP_default.OP_PUSHDATA4) {
-        if (!this.isRelaxed() && !isChunkMinimalPushHelper(operation)) {
-          this.scriptEvaluationError(`This data is not minimally-encoded. (PC: ${this.programCounter})`);
-        }
-        this.pushStack(Array.isArray(operation.data) ? operation.data : []);
+        this.executeDataPush(operation);
       } else if (isScriptExecuting || currentOpcode >= OP_default.OP_IF && currentOpcode <= OP_default.OP_ENDIF) {
         let buf, buf1, buf2, buf3;
         let x1, x2, x3;
@@ -11302,6 +11873,10 @@ ${ifStackInfo}`;
         let bufSig, bufPubkey;
         let sig, pubkey;
         let i, ikey, isig, nKeysCount, nSigsCount, fOk;
+        this.countExecutedOpcode(currentOpcode, isScriptExecuting);
+        if (this.skipUnavailablePreChronicleOpcode(currentOpcode, isScriptExecuting))
+          return true;
+        this.enforceDiscouragedNop(currentOpcode, isScriptExecuting);
         switch (currentOpcode) {
           case OP_default.OP_VER: {
             const ver = this.transactionVersion;
@@ -11309,69 +11884,84 @@ ${ifStackInfo}`;
             break;
           }
           case OP_default.OP_SUBSTR: {
-            if (this.stack.length < 3)
-              this.scriptEvaluationError("OP_SUBSTR requires at least three items to be on the stack.");
-            const len = BigNumber.fromScriptNum(this.popStack(), !this.isRelaxed()).toNumber();
-            const offset = BigNumber.fromScriptNum(this.popStack(), !this.isRelaxed()).toNumber();
-            buf = this.popStack();
-            const size2 = buf.length;
-            if (offset < 0 || offset >= size2 || len < 0 || len > size2 - offset) {
-              this.scriptEvaluationError(`OP_SUBSTR offset (${offset}) must be in range [0, ${size2}) and length (${len}) must be in range [0, ${size2 - offset}]`);
-            }
-            this.pushStack(buf.slice(offset, offset + len));
+            ;
+            (() => {
+              if (this.stack.length < 3)
+                this.scriptEvaluationError("OP_SUBSTR requires at least three items to be on the stack.");
+              const len = this.readScriptNumber(this.popStack()).toNumber();
+              const offset = this.readScriptNumber(this.popStack()).toNumber();
+              buf = this.popStack();
+              const size2 = buf.length;
+              if (offset < 0 || offset >= size2 || len < 0 || len > size2 - offset) {
+                this.scriptEvaluationError(`OP_SUBSTR offset (${offset}) must be in range [0, ${size2}) and length (${len}) must be in range [0, ${size2 - offset}]`);
+              }
+              this.pushStack(buf.slice(offset, offset + len));
+            })();
             break;
           }
           case OP_default.OP_LEFT: {
-            if (this.stack.length < 2)
-              this.scriptEvaluationError("OP_LEFT requires at least two items to be on the stack.");
-            const len = BigNumber.fromScriptNum(this.popStack(), !this.isRelaxed()).toNumber();
-            buf = this.popStack();
-            const size2 = buf.length;
-            if (len < 0 || len > size2) {
-              this.scriptEvaluationError(`OP_LEFT length (${len}) must be in range [0, ${size2}]`);
-            }
-            this.pushStack(buf.slice(0, len));
+            ;
+            (() => {
+              if (this.stack.length < 2)
+                this.scriptEvaluationError("OP_LEFT requires at least two items to be on the stack.");
+              const len = this.readScriptNumber(this.popStack()).toNumber();
+              buf = this.popStack();
+              const size2 = buf.length;
+              if (len < 0 || len > size2) {
+                this.scriptEvaluationError(`OP_LEFT length (${len}) must be in range [0, ${size2}]`);
+              }
+              this.pushStack(buf.slice(0, len));
+            })();
             break;
           }
           case OP_default.OP_RIGHT: {
-            if (this.stack.length < 2)
-              this.scriptEvaluationError("OP_RIGHT requires at least two items to be on the stack.");
-            const len = BigNumber.fromScriptNum(this.popStack(), !this.isRelaxed()).toNumber();
-            buf = this.popStack();
-            const size2 = buf.length;
-            if (len < 0 || len > size2) {
-              this.scriptEvaluationError(`OP_RIGHT length (${len}) must be in range [0, ${size2}]`);
-            }
-            this.pushStack(buf.slice(size2 - len));
+            ;
+            (() => {
+              if (this.stack.length < 2)
+                this.scriptEvaluationError("OP_RIGHT requires at least two items to be on the stack.");
+              const len = this.readScriptNumber(this.popStack()).toNumber();
+              buf = this.popStack();
+              const size2 = buf.length;
+              if (len < 0 || len > size2) {
+                this.scriptEvaluationError(`OP_RIGHT length (${len}) must be in range [0, ${size2}]`);
+              }
+              this.pushStack(buf.slice(size2 - len));
+            })();
             break;
           }
           case OP_default.OP_LSHIFTNUM: {
-            if (this.stack.length < 2)
-              this.scriptEvaluationError("OP_LSHIFTNUM requires at least two items to be on the stack.");
-            const bits = BigNumber.fromScriptNum(this.popStack(), !this.isRelaxed()).toBigInt();
-            if (bits < 0) {
-              this.scriptEvaluationError("OP_LSHIFTNUM bits to shift must not be negative.");
-            }
-            const value = BigNumber.fromScriptNum(this.popStack(), !this.isRelaxed()).toBigInt();
-            const resultBn = new BigNumber(value << bits);
-            this.pushStack(resultBn.toScriptNum());
+            ;
+            (() => {
+              if (this.stack.length < 2)
+                this.scriptEvaluationError("OP_LSHIFTNUM requires at least two items to be on the stack.");
+              const bits = this.readScriptNumber(this.popStack()).toBigInt();
+              if (bits < 0) {
+                this.scriptEvaluationError("OP_LSHIFTNUM bits to shift must not be negative.");
+              }
+              const value = this.readScriptNumber(this.popStack()).toBigInt();
+              const resultBn = new BigNumber(value << bits);
+              this.pushStack(resultBn.toScriptNum());
+            })();
             break;
           }
           case OP_default.OP_RSHIFTNUM: {
-            if (this.stack.length < 2)
-              this.scriptEvaluationError("OP_RSHIFTNUM requires at least two items to be on the stack.");
-            const bits = BigNumber.fromScriptNum(this.popStack(), !this.isRelaxed()).toBigInt();
-            if (bits < 0) {
-              this.scriptEvaluationError("OP_RSHIFTNUM bits to shift must not be negative.");
-            }
-            const value = BigNumber.fromScriptNum(this.popStack(), !this.isRelaxed()).toBigInt();
-            let resultBn;
-            if (value < 0) {
-              resultBn = new BigNumber(-(-value >> bits));
-            } else {
-              resultBn = new BigNumber(value >> bits);
-            }
-            this.pushStack(resultBn.toScriptNum());
+            ;
+            (() => {
+              if (this.stack.length < 2)
+                this.scriptEvaluationError("OP_RSHIFTNUM requires at least two items to be on the stack.");
+              const bits = this.readScriptNumber(this.popStack()).toBigInt();
+              if (bits < 0) {
+                this.scriptEvaluationError("OP_RSHIFTNUM bits to shift must not be negative.");
+              }
+              const value = this.readScriptNumber(this.popStack()).toBigInt();
+              let resultBn;
+              if (value < 0) {
+                resultBn = new BigNumber(-(-value >> bits));
+              } else {
+                resultBn = new BigNumber(value >> bits);
+              }
+              this.pushStack(resultBn.toScriptNum());
+            })();
             break;
           }
           case OP_default.OP_1NEGATE:
@@ -11407,96 +11997,144 @@ ${ifStackInfo}`;
           // OP_NOP2 (0xb1) = OP_CHECKLOCKTIMEVERIFY: on BSV post-genesis treated as NOP
           // falls through
           case OP_default.OP_CHECKLOCKTIMEVERIFY:
+            break;
           // OP_NOP3 (0xb2) = OP_CHECKSEQUENCEVERIFY: on BSV post-genesis treated as NOP
-          // falls through
           case OP_default.OP_CHECKSEQUENCEVERIFY:
+            ;
+            (() => {
+              if (this.hasFlag("CHECKSEQUENCEVERIFY")) {
+                if (this.stack.length < 1)
+                  this.scriptEvaluationError("OP_CHECKSEQUENCEVERIFY requires at least one item to be on the stack.");
+                let sequenceLock = 0n;
+                try {
+                  sequenceLock = BigNumber.fromScriptNum(this.stackTop(), this.shouldEnforceMinimalData(), 5).toBigInt();
+                } catch {
+                  this.scriptEvaluationError("OP_CHECKSEQUENCEVERIFY requires a minimally-encoded numeric lock time.");
+                }
+                if (sequenceLock < 0n)
+                  this.scriptEvaluationError("OP_CHECKSEQUENCEVERIFY requires a non-negative lock time.");
+                if (Number(sequenceLock & BigInt(sequenceLocktimeDisableFlag)) === 0 && this.transactionVersion < 2) {
+                  this.scriptEvaluationError("OP_CHECKSEQUENCEVERIFY lock time is unsatisfied.");
+                }
+              }
+            })();
+            break;
           case OP_default.OP_NOP9:
           case OP_default.OP_NOP10:
             break;
           case OP_default.OP_VERIF:
           case OP_default.OP_VERNOTIF:
-            fValue = false;
-            if (isScriptExecuting) {
-              if (this.stack.length < 1)
-                this.scriptEvaluationError("OP_VERIF and OP_VERNOTIF require at least one item on the stack when they are used!");
-              buf1 = this.popStack();
-              if (buf1.length === 4) {
-                const ver = this.transactionVersion;
-                buf2 = [ver & 255, ver >>> 8 & 255, ver >>> 16 & 255, ver >>> 24 & 255];
-                fValue = compareNumberArrays(buf1, buf2);
+            ;
+            (() => {
+              fValue = false;
+              if (isScriptExecuting) {
+                if (this.stack.length < 1)
+                  this.scriptEvaluationError("OP_VERIF and OP_VERNOTIF require at least one item on the stack when they are used!");
+                buf1 = this.popStack();
+                if (buf1.length === 4) {
+                  const ver = this.transactionVersion;
+                  buf2 = [ver & 255, ver >>> 8 & 255, ver >>> 16 & 255, ver >>> 24 & 255];
+                  fValue = compareNumberArrays(buf1, buf2);
+                }
+                if (currentOpcode === OP_default.OP_VERNOTIF)
+                  fValue = !fValue;
               }
-              if (currentOpcode === OP_default.OP_VERNOTIF)
-                fValue = !fValue;
-            }
-            this.ifStack.push(fValue);
+              this.ifStack.push(fValue);
+              this.elseStack.push(false);
+            })();
             break;
           case OP_default.OP_IF:
           case OP_default.OP_NOTIF:
-            fValue = false;
-            if (isScriptExecuting) {
-              if (this.stack.length < 1)
-                this.scriptEvaluationError("OP_IF and OP_NOTIF require at least one item on the stack when they are used!");
-              buf = this.popStack();
-              fValue = this.castToBool(buf);
-              if (currentOpcode === OP_default.OP_NOTIF)
-                fValue = !fValue;
-            }
-            this.ifStack.push(fValue);
+            ;
+            (() => {
+              fValue = false;
+              if (isScriptExecuting) {
+                if (this.stack.length < 1)
+                  this.scriptEvaluationError("OP_IF and OP_NOTIF require at least one item on the stack when they are used!");
+                buf = this.popStack();
+                if (this.hasFlag("MINIMALIF") && buf.length > 0 && !(buf.length === 1 && buf[0] === 1)) {
+                  this.scriptEvaluationError("OP_IF and OP_NOTIF require minimal truth values.");
+                }
+                fValue = this.castToBool(buf);
+                if (currentOpcode === OP_default.OP_NOTIF)
+                  fValue = !fValue;
+              }
+              this.ifStack.push(fValue);
+              this.elseStack.push(false);
+            })();
             break;
           case OP_default.OP_ELSE:
-            if (this.ifStack.length === 0)
-              this.scriptEvaluationError("OP_ELSE requires a preceeding OP_IF.");
-            this.ifStack[this.ifStack.length - 1] = !this.ifStack[this.ifStack.length - 1];
+            ;
+            (() => {
+              if (this.ifStack.length === 0)
+                this.scriptEvaluationError("OP_ELSE requires a preceeding OP_IF.");
+              if (this.hasExplicitFlags() && this.isAfterGenesis() && this.elseStack.at(-1) === true) {
+                this.scriptEvaluationError("OP_ELSE may only be used once for each OP_IF or OP_NOTIF after Genesis.");
+              }
+              this.elseStack[this.elseStack.length - 1] = true;
+              this.ifStack[this.ifStack.length - 1] = this.ifStack.at(-1) !== true;
+            })();
             break;
           case OP_default.OP_ENDIF:
-            if (this.ifStack.length === 0)
-              this.scriptEvaluationError("OP_ENDIF requires a preceeding OP_IF.");
-            this.ifStack.pop();
+            ;
+            (() => {
+              if (this.ifStack.length === 0)
+                this.scriptEvaluationError("OP_ENDIF requires a preceeding OP_IF.");
+              this.ifStack.pop();
+              this.elseStack.pop();
+            })();
             break;
           case OP_default.OP_VERIFY:
-            if (this.stack.length < 1)
-              this.scriptEvaluationError("OP_VERIFY requires at least one item to be on the stack.");
-            buf1 = this.stackTop();
-            fValue = this.castToBool(buf1);
-            if (!fValue)
-              this.scriptEvaluationError("OP_VERIFY requires the top stack value to be truthy.");
-            this.popStack();
+            ;
+            (() => {
+              if (this.stack.length < 1)
+                this.scriptEvaluationError("OP_VERIFY requires at least one item to be on the stack.");
+              buf1 = this.stackTop();
+              fValue = this.castToBool(buf1);
+              if (!fValue)
+                this.scriptEvaluationError("OP_VERIFY requires the top stack value to be truthy.");
+              this.popStack();
+            })();
             break;
           case OP_default.OP_RETURN:
-            if (this.context === "UnlockingScript")
-              this.programCounter = this.unlockingScript.chunks.length;
-            else
-              this.programCounter = this.lockingScript.chunks.length;
-            this.ifStack = [];
-            this.programCounter--;
+            ;
+            (() => {
+              if (this.hasExplicitFlags() && !this.isAfterGenesis()) {
+                this.scriptEvaluationError("OP_RETURN is invalid before Genesis.");
+              }
+              if (this.ifStack.length > 0) {
+                this.returningFromConditional = true;
+              } else {
+                if (this.context === "UnlockingScript")
+                  this.programCounter = this.unlockingScript.chunks.length;
+                else
+                  this.programCounter = this.lockingScript.chunks.length;
+                this.programCounter--;
+              }
+            })();
             break;
           case OP_default.OP_TOALTSTACK:
-            if (this.stack.length < 1)
-              this.scriptEvaluationError("OP_TOALTSTACK requires at oeast one item to be on the stack.");
+            this.requireStackItems(1, "OP_TOALTSTACK requires at oeast one item to be on the stack.");
             this.pushAltStack(this.popStack());
             break;
           case OP_default.OP_FROMALTSTACK:
-            if (this.altStack.length < 1)
-              this.scriptEvaluationError("OP_FROMALTSTACK requires at least one item to be on the stack.");
+            this.requireAltStackItems(1, "OP_FROMALTSTACK requires at least one item to be on the stack.");
             this.pushStack(this.popAltStack());
             break;
           case OP_default.OP_2DROP:
-            if (this.stack.length < 2)
-              this.scriptEvaluationError("OP_2DROP requires at least two items to be on the stack.");
+            this.requireStackItems(2, "OP_2DROP requires at least two items to be on the stack.");
             this.popStack();
             this.popStack();
             break;
           case OP_default.OP_2DUP:
-            if (this.stack.length < 2)
-              this.scriptEvaluationError("OP_2DUP requires at least two items to be on the stack.");
+            this.requireStackItems(2, "OP_2DUP requires at least two items to be on the stack.");
             buf1 = this.stackTop(-2);
             buf2 = this.stackTop(-1);
             this.pushStackCopy(buf1);
             this.pushStackCopy(buf2);
             break;
           case OP_default.OP_3DUP:
-            if (this.stack.length < 3)
-              this.scriptEvaluationError("OP_3DUP requires at least three items to be on the stack.");
+            this.requireStackItems(3, "OP_3DUP requires at least three items to be on the stack.");
             buf1 = this.stackTop(-3);
             buf2 = this.stackTop(-2);
             buf3 = this.stackTop(-1);
@@ -11505,16 +12143,14 @@ ${ifStackInfo}`;
             this.pushStackCopy(buf3);
             break;
           case OP_default.OP_2OVER:
-            if (this.stack.length < 4)
-              this.scriptEvaluationError("OP_2OVER requires at least four items to be on the stack.");
+            this.requireStackItems(4, "OP_2OVER requires at least four items to be on the stack.");
             buf1 = this.stackTop(-4);
             buf2 = this.stackTop(-3);
             this.pushStackCopy(buf1);
             this.pushStackCopy(buf2);
             break;
           case OP_default.OP_2ROT: {
-            if (this.stack.length < 6)
-              this.scriptEvaluationError("OP_2ROT requires at least six items to be on the stack.");
+            this.requireStackItems(6, "OP_2ROT requires at least six items to be on the stack.");
             const rot6 = this.popStack();
             const rot5 = this.popStack();
             const rot4 = this.popStack();
@@ -11530,8 +12166,7 @@ ${ifStackInfo}`;
             break;
           }
           case OP_default.OP_2SWAP: {
-            if (this.stack.length < 4)
-              this.scriptEvaluationError("OP_2SWAP requires at least four items to be on the stack.");
+            this.requireStackItems(4, "OP_2SWAP requires at least four items to be on the stack.");
             const swap4 = this.popStack();
             const swap3 = this.popStack();
             const swap2 = this.popStack();
@@ -11543,61 +12178,60 @@ ${ifStackInfo}`;
             break;
           }
           case OP_default.OP_IFDUP:
-            if (this.stack.length < 1)
-              this.scriptEvaluationError("OP_IFDUP requires at least one item to be on the stack.");
-            buf1 = this.stackTop();
-            if (this.castToBool(buf1)) {
-              this.pushStackCopy(buf1);
-            }
+            ;
+            (() => {
+              this.requireStackItems(1, "OP_IFDUP requires at least one item to be on the stack.");
+              buf1 = this.stackTop();
+              if (this.castToBool(buf1)) {
+                this.pushStackCopy(buf1);
+              }
+            })();
             break;
           case OP_default.OP_DEPTH:
             this.pushStack(new BigNumber(this.stack.length).toScriptNum());
             break;
           case OP_default.OP_DROP:
-            if (this.stack.length < 1)
-              this.scriptEvaluationError("OP_DROP requires at least one item to be on the stack.");
+            this.requireStackItems(1, "OP_DROP requires at least one item to be on the stack.");
             this.popStack();
             break;
           case OP_default.OP_DUP:
-            if (this.stack.length < 1)
-              this.scriptEvaluationError("OP_DUP requires at least one item to be on the stack.");
+            this.requireStackItems(1, "OP_DUP requires at least one item to be on the stack.");
             this.pushStackCopy(this.stackTop());
             break;
           case OP_default.OP_NIP:
-            if (this.stack.length < 2)
-              this.scriptEvaluationError("OP_NIP requires at least two items to be on the stack.");
+            this.requireStackItems(2, "OP_NIP requires at least two items to be on the stack.");
             buf2 = this.popStack();
             this.popStack();
             this.pushStack(buf2);
             break;
           case OP_default.OP_OVER:
-            if (this.stack.length < 2)
-              this.scriptEvaluationError("OP_OVER requires at least two items to be on the stack.");
+            this.requireStackItems(2, "OP_OVER requires at least two items to be on the stack.");
             this.pushStackCopy(this.stackTop(-2));
             break;
           case OP_default.OP_PICK:
           case OP_default.OP_ROLL: {
-            if (this.stack.length < 2)
-              this.scriptEvaluationError(`${OP_default[currentOpcode]} requires at least two items to be on the stack.`);
-            bn = BigNumber.fromScriptNum(this.popStack(), !this.isRelaxed());
-            const nBigInt = bn.toBigInt();
-            if (nBigInt < 0n || nBigInt >= BigInt(this.stack.length)) {
-              this.scriptEvaluationError(`${OP_default[currentOpcode]} requires the top stack element to be 0 or a positive number less than the current size of the stack.`);
-            }
-            const nIndex = Number(nBigInt);
-            const itemToMoveOrCopy = this.stack[this.stack.length - 1 - nIndex];
-            if (currentOpcode === OP_default.OP_ROLL) {
-              this.stack.splice(this.stack.length - 1 - nIndex, 1);
-              this.stackMem -= itemToMoveOrCopy.length;
-              this.pushStack(itemToMoveOrCopy);
-            } else {
-              this.pushStackCopy(itemToMoveOrCopy);
-            }
+            ;
+            (() => {
+              this.requireStackItems(2, `${OP_default[currentOpcode]} requires at least two items to be on the stack.`);
+              bn = this.readScriptNumber(this.popStack());
+              const nBigInt = bn.toBigInt();
+              if (nBigInt < 0n || nBigInt >= BigInt(this.stack.length)) {
+                this.scriptEvaluationError(`${OP_default[currentOpcode]} requires the top stack element to be 0 or a positive number less than the current size of the stack.`);
+              }
+              const nIndex = Number(nBigInt);
+              const itemToMoveOrCopy = this.stack[this.stack.length - 1 - nIndex];
+              if (currentOpcode === OP_default.OP_ROLL) {
+                this.stack.splice(this.stack.length - 1 - nIndex, 1);
+                this.stackMem -= itemToMoveOrCopy.length;
+                this.pushStack(itemToMoveOrCopy);
+              } else {
+                this.pushStackCopy(itemToMoveOrCopy);
+              }
+            })();
             break;
           }
           case OP_default.OP_ROT:
-            if (this.stack.length < 3)
-              this.scriptEvaluationError("OP_ROT requires at least three items to be on the stack.");
+            this.requireStackItems(3, "OP_ROT requires at least three items to be on the stack.");
             x3 = this.popStack();
             x2 = this.popStack();
             x1 = this.popStack();
@@ -11606,97 +12240,102 @@ ${ifStackInfo}`;
             this.pushStack(x1);
             break;
           case OP_default.OP_SWAP:
-            if (this.stack.length < 2)
-              this.scriptEvaluationError("OP_SWAP requires at least two items to be on the stack.");
+            this.requireStackItems(2, "OP_SWAP requires at least two items to be on the stack.");
             x2 = this.popStack();
             x1 = this.popStack();
             this.pushStack(x2);
             this.pushStack(x1);
             break;
           case OP_default.OP_TUCK:
-            if (this.stack.length < 2)
-              this.scriptEvaluationError("OP_TUCK requires at least two items to be on the stack.");
+            this.requireStackItems(2, "OP_TUCK requires at least two items to be on the stack.");
             buf1 = this.stackTop(-1);
             this.ensureStackMem(buf1.length);
             this.stack.splice(-2, 0, buf1.slice());
             this.stackMem += buf1.length;
             break;
           case OP_default.OP_SIZE:
-            if (this.stack.length < 1)
-              this.scriptEvaluationError("OP_SIZE requires at least one item to be on the stack.");
+            this.requireStackItems(1, "OP_SIZE requires at least one item to be on the stack.");
             this.pushStack(new BigNumber(this.stackTop().length).toScriptNum());
             break;
           case OP_default.OP_AND:
           case OP_default.OP_OR:
           case OP_default.OP_XOR: {
-            if (this.stack.length < 2)
-              this.scriptEvaluationError(`${OP_default[currentOpcode]} requires at least two items on the stack.`);
-            buf2 = this.popStack();
-            buf1 = this.popStack();
-            if (buf1.length !== buf2.length)
-              this.scriptEvaluationError(`${OP_default[currentOpcode]} requires the top two stack items to be the same size.`);
-            const resultBufBitwiseOp = new Array(buf1.length);
-            for (let k = 0; k < buf1.length; k++) {
-              if (currentOpcode === OP_default.OP_AND)
-                resultBufBitwiseOp[k] = buf1[k] & buf2[k];
-              else if (currentOpcode === OP_default.OP_OR)
-                resultBufBitwiseOp[k] = buf1[k] | buf2[k];
-              else
-                resultBufBitwiseOp[k] = buf1[k] ^ buf2[k];
-            }
-            this.pushStack(resultBufBitwiseOp);
+            ;
+            (() => {
+              this.requireStackItems(2, `${OP_default[currentOpcode]} requires at least two items on the stack.`);
+              buf2 = this.popStack();
+              buf1 = this.popStack();
+              if (buf1.length !== buf2.length)
+                this.scriptEvaluationError(`${OP_default[currentOpcode]} requires the top two stack items to be the same size.`);
+              const resultBufBitwiseOp = Array.from({ length: buf1.length }, () => 0);
+              for (let k = 0; k < buf1.length; k++) {
+                if (currentOpcode === OP_default.OP_AND)
+                  resultBufBitwiseOp[k] = buf1[k] & buf2[k];
+                else if (currentOpcode === OP_default.OP_OR)
+                  resultBufBitwiseOp[k] = buf1[k] | buf2[k];
+                else
+                  resultBufBitwiseOp[k] = buf1[k] ^ buf2[k];
+              }
+              this.pushStack(resultBufBitwiseOp);
+            })();
             break;
           }
           case OP_default.OP_INVERT: {
-            if (this.stack.length < 1)
-              this.scriptEvaluationError("OP_INVERT requires at least one item to be on the stack.");
-            buf = this.popStack();
-            const invertedBufOp = new Array(buf.length);
-            for (let k = 0; k < buf.length; k++) {
-              invertedBufOp[k] = ~buf[k] & 255;
-            }
-            this.pushStack(invertedBufOp);
+            ;
+            (() => {
+              this.requireStackItems(1, "OP_INVERT requires at least one item to be on the stack.");
+              buf = this.popStack();
+              const invertedBufOp = Array.from({ length: buf.length }, () => 0);
+              for (let k = 0; k < buf.length; k++) {
+                invertedBufOp[k] = ~buf[k] & 255;
+              }
+              this.pushStack(invertedBufOp);
+            })();
             break;
           }
           case OP_default.OP_LSHIFT:
           case OP_default.OP_RSHIFT: {
-            if (this.stack.length < 2)
-              this.scriptEvaluationError(`${OP_default[currentOpcode]} requires at least two items to be on the stack.`);
-            bn2 = BigNumber.fromScriptNum(this.popStack(), !this.isRelaxed());
-            buf1 = this.popStack();
-            const shiftBits = bn2.toBigInt();
-            if (shiftBits < 0n)
-              this.scriptEvaluationError(`${OP_default[currentOpcode]} requires the top item on the stack not to be negative.`);
-            if (buf1.length === 0) {
-              this.pushStack([]);
-              break;
-            }
-            bn1 = new BigNumber(buf1);
-            let shiftedBn;
-            if (currentOpcode === OP_default.OP_LSHIFT) {
-              shiftedBn = bn1.ushln(shiftBits);
-              const mask = new BigNumber(1).ushln(buf1.length * 8).isubn(1);
-              shiftedBn = shiftedBn.iand(mask);
-            } else {
-              shiftedBn = bn1.ushrn(shiftBits);
-            }
-            const shiftedArr = shiftedBn.toArray("be", buf1.length);
-            this.pushStack(shiftedArr);
+            ;
+            (() => {
+              this.requireStackItems(2, `${OP_default[currentOpcode]} requires at least two items to be on the stack.`);
+              bn2 = this.readScriptNumber(this.popStack());
+              buf1 = this.popStack();
+              const shiftBits = bn2.toBigInt();
+              if (shiftBits < 0n)
+                this.scriptEvaluationError(`${OP_default[currentOpcode]} requires the top item on the stack not to be negative.`);
+              if (buf1.length === 0) {
+                this.pushStack([]);
+                return;
+              }
+              bn1 = new BigNumber(buf1);
+              let shiftedBn;
+              if (currentOpcode === OP_default.OP_LSHIFT) {
+                shiftedBn = bn1.ushln(shiftBits);
+                const mask = new BigNumber(1).ushln(buf1.length * 8).isubn(1);
+                shiftedBn = shiftedBn.iand(mask);
+              } else {
+                shiftedBn = bn1.ushrn(shiftBits);
+              }
+              const shiftedArr = shiftedBn.toArray("be", buf1.length);
+              this.pushStack(shiftedArr);
+            })();
             break;
           }
           case OP_default.OP_EQUAL:
           case OP_default.OP_EQUALVERIFY:
-            if (this.stack.length < 2)
-              this.scriptEvaluationError(`${OP_default[currentOpcode]} requires at least two items to be on the stack.`);
-            buf2 = this.popStack();
-            buf1 = this.popStack();
-            fValue = compareNumberArrays(buf1, buf2);
-            this.pushStack(fValue ? [1] : []);
-            if (currentOpcode === OP_default.OP_EQUALVERIFY) {
-              if (!fValue)
-                this.scriptEvaluationError("OP_EQUALVERIFY requires the top two stack items to be equal.");
-              this.popStack();
-            }
+            ;
+            (() => {
+              this.requireStackItems(2, `${OP_default[currentOpcode]} requires at least two items to be on the stack.`);
+              buf2 = this.popStack();
+              buf1 = this.popStack();
+              fValue = compareNumberArrays(buf1, buf2);
+              this.pushStack(fValue ? [1] : []);
+              if (currentOpcode === OP_default.OP_EQUALVERIFY) {
+                if (!fValue)
+                  this.scriptEvaluationError("OP_EQUALVERIFY requires the top two stack items to be equal.");
+                this.popStack();
+              }
+            })();
             break;
           case OP_default.OP_1ADD:
           case OP_default.OP_1SUB:
@@ -11706,37 +12345,39 @@ ${ifStackInfo}`;
           case OP_default.OP_ABS:
           case OP_default.OP_NOT:
           case OP_default.OP_0NOTEQUAL:
-            if (this.stack.length < 1)
-              this.scriptEvaluationError(`${OP_default[currentOpcode]} requires at least one item to be on the stack.`);
-            bn = BigNumber.fromScriptNum(this.popStack(), !this.isRelaxed());
-            switch (currentOpcode) {
-              case OP_default.OP_1ADD:
-                bn = bn.add(new BigNumber(1));
-                break;
-              case OP_default.OP_1SUB:
-                bn = bn.sub(new BigNumber(1));
-                break;
-              case OP_default.OP_2MUL:
-                bn = bn.mul(new BigNumber(2));
-                break;
-              case OP_default.OP_2DIV:
-                bn = bn.div(new BigNumber(2));
-                break;
-              case OP_default.OP_NEGATE:
-                bn = bn.neg();
-                break;
-              case OP_default.OP_ABS:
-                if (bn.isNeg())
+            ;
+            (() => {
+              this.requireStackItems(1, `${OP_default[currentOpcode]} requires at least one item to be on the stack.`);
+              bn = this.readScriptNumber(this.popStack());
+              switch (currentOpcode) {
+                case OP_default.OP_1ADD:
+                  bn = bn.add(new BigNumber(1));
+                  break;
+                case OP_default.OP_1SUB:
+                  bn = bn.sub(new BigNumber(1));
+                  break;
+                case OP_default.OP_2MUL:
+                  bn = bn.mul(new BigNumber(2));
+                  break;
+                case OP_default.OP_2DIV:
+                  bn = bn.div(new BigNumber(2));
+                  break;
+                case OP_default.OP_NEGATE:
                   bn = bn.neg();
-                break;
-              case OP_default.OP_NOT:
-                bn = new BigNumber(bn.cmpn(0) === 0 ? 1 : 0);
-                break;
-              case OP_default.OP_0NOTEQUAL:
-                bn = new BigNumber(bn.cmpn(0) === 0 ? 0 : 1);
-                break;
-            }
-            this.pushStack(bn.toScriptNum());
+                  break;
+                case OP_default.OP_ABS:
+                  if (bn.isNeg())
+                    bn = bn.neg();
+                  break;
+                case OP_default.OP_NOT:
+                  bn = new BigNumber(bn.cmpn(0) === 0 ? 1 : 0);
+                  break;
+                case OP_default.OP_0NOTEQUAL:
+                  bn = new BigNumber(bn.cmpn(0) === 0 ? 0 : 1);
+                  break;
+              }
+              this.pushStack(bn.toScriptNum());
+            })();
             break;
           case OP_default.OP_ADD:
           case OP_default.OP_SUB:
@@ -11754,94 +12395,80 @@ ${ifStackInfo}`;
           case OP_default.OP_GREATERTHANOREQUAL:
           case OP_default.OP_MIN:
           case OP_default.OP_MAX: {
-            if (this.stack.length < 2)
-              this.scriptEvaluationError(`${OP_default[currentOpcode]} requires at least two items to be on the stack.`);
-            buf2 = this.popStack();
-            buf1 = this.popStack();
-            bn2 = BigNumber.fromScriptNum(buf2, !this.isRelaxed());
-            bn1 = BigNumber.fromScriptNum(buf1, !this.isRelaxed());
-            let predictedLen = 0;
-            switch (currentOpcode) {
-              case OP_default.OP_MUL:
-                predictedLen = bn1.byteLength() + bn2.byteLength();
-                break;
-              case OP_default.OP_ADD:
-              case OP_default.OP_SUB:
-                predictedLen = Math.max(bn1.byteLength(), bn2.byteLength()) + 1;
-                break;
-              default:
-                predictedLen = Math.max(bn1.byteLength(), bn2.byteLength());
-            }
-            this.ensureStackMem(predictedLen);
-            let resultBnArithmetic = new BigNumber(0);
-            switch (currentOpcode) {
-              case OP_default.OP_ADD:
-                resultBnArithmetic = bn1.add(bn2);
-                break;
-              case OP_default.OP_SUB:
-                resultBnArithmetic = bn1.sub(bn2);
-                break;
-              case OP_default.OP_MUL:
-                resultBnArithmetic = bn1.mul(bn2);
-                break;
-              case OP_default.OP_DIV:
-                if (bn2.cmpn(0) === 0)
-                  this.scriptEvaluationError("OP_DIV cannot divide by zero!");
-                resultBnArithmetic = bn1.div(bn2);
-                break;
-              case OP_default.OP_MOD:
-                if (bn2.cmpn(0) === 0)
-                  this.scriptEvaluationError("OP_MOD cannot divide by zero!");
-                resultBnArithmetic = bn1.mod(bn2);
-                break;
-              case OP_default.OP_BOOLAND:
-                resultBnArithmetic = new BigNumber(bn1.cmpn(0) !== 0 && bn2.cmpn(0) !== 0 ? 1 : 0);
-                break;
-              case OP_default.OP_BOOLOR:
-                resultBnArithmetic = new BigNumber(bn1.cmpn(0) !== 0 || bn2.cmpn(0) !== 0 ? 1 : 0);
-                break;
-              case OP_default.OP_NUMEQUAL:
-                resultBnArithmetic = new BigNumber(bn1.cmp(bn2) === 0 ? 1 : 0);
-                break;
-              case OP_default.OP_NUMEQUALVERIFY:
-                resultBnArithmetic = new BigNumber(bn1.cmp(bn2) === 0 ? 1 : 0);
-                break;
-              case OP_default.OP_NUMNOTEQUAL:
-                resultBnArithmetic = new BigNumber(bn1.cmp(bn2) === 0 ? 0 : 1);
-                break;
-              case OP_default.OP_LESSTHAN:
-                resultBnArithmetic = new BigNumber(bn1.cmp(bn2) < 0 ? 1 : 0);
-                break;
-              case OP_default.OP_GREATERTHAN:
-                resultBnArithmetic = new BigNumber(bn1.cmp(bn2) > 0 ? 1 : 0);
-                break;
-              case OP_default.OP_LESSTHANOREQUAL:
-                resultBnArithmetic = new BigNumber(bn1.cmp(bn2) <= 0 ? 1 : 0);
-                break;
-              case OP_default.OP_GREATERTHANOREQUAL:
-                resultBnArithmetic = new BigNumber(bn1.cmp(bn2) >= 0 ? 1 : 0);
-                break;
-              case OP_default.OP_MIN:
-                resultBnArithmetic = bn1.cmp(bn2) < 0 ? bn1 : bn2;
-                break;
-              case OP_default.OP_MAX:
-                resultBnArithmetic = bn1.cmp(bn2) > 0 ? bn1 : bn2;
-                break;
-            }
-            this.pushStack(resultBnArithmetic.toScriptNum());
-            if (currentOpcode === OP_default.OP_NUMEQUALVERIFY) {
-              if (!this.castToBool(this.stackTop()))
-                this.scriptEvaluationError("OP_NUMEQUALVERIFY requires the top stack item to be truthy.");
-              this.popStack();
-            }
+            ;
+            (() => {
+              this.requireStackItems(2, `${OP_default[currentOpcode]} requires at least two items to be on the stack.`);
+              buf2 = this.popStack();
+              buf1 = this.popStack();
+              bn2 = this.readScriptNumber(buf2);
+              bn1 = this.readScriptNumber(buf1);
+              const predictedLen = (() => {
+                switch (currentOpcode) {
+                  case OP_default.OP_MUL:
+                    return bn1.byteLength() + bn2.byteLength();
+                  case OP_default.OP_ADD:
+                  case OP_default.OP_SUB:
+                    return Math.max(bn1.byteLength(), bn2.byteLength()) + 1;
+                  default:
+                    return Math.max(bn1.byteLength(), bn2.byteLength());
+                }
+              })();
+              this.ensureStackMem(predictedLen);
+              const resultBnArithmetic = (() => {
+                switch (currentOpcode) {
+                  case OP_default.OP_ADD:
+                    return bn1.add(bn2);
+                  case OP_default.OP_SUB:
+                    return bn1.sub(bn2);
+                  case OP_default.OP_MUL:
+                    return bn1.mul(bn2);
+                  case OP_default.OP_DIV:
+                    if (bn2.cmpn(0) === 0)
+                      this.scriptEvaluationError("OP_DIV cannot divide by zero!");
+                    return bn1.div(bn2);
+                  case OP_default.OP_MOD:
+                    if (bn2.cmpn(0) === 0)
+                      this.scriptEvaluationError("OP_MOD cannot divide by zero!");
+                    return bn1.mod(bn2);
+                  case OP_default.OP_BOOLAND:
+                    return scriptBooleanAnd(bn1.cmpn(0) !== 0, bn2.cmpn(0) !== 0);
+                  case OP_default.OP_BOOLOR:
+                    return scriptBooleanOr(bn1.cmpn(0) !== 0, bn2.cmpn(0) !== 0);
+                  case OP_default.OP_NUMEQUAL:
+                  case OP_default.OP_NUMEQUALVERIFY:
+                    return scriptBoolean(bn1.cmp(bn2) === 0);
+                  case OP_default.OP_NUMNOTEQUAL:
+                    return scriptBoolean(bn1.cmp(bn2) !== 0);
+                  case OP_default.OP_LESSTHAN:
+                    return scriptBoolean(bn1.cmp(bn2) < 0);
+                  case OP_default.OP_GREATERTHAN:
+                    return scriptBoolean(bn1.cmp(bn2) > 0);
+                  case OP_default.OP_LESSTHANOREQUAL:
+                    return scriptBoolean(bn1.cmp(bn2) <= 0);
+                  case OP_default.OP_GREATERTHANOREQUAL:
+                    return scriptBoolean(bn1.cmp(bn2) >= 0);
+                  case OP_default.OP_MIN:
+                    return smallerBigNumber(bn1, bn2);
+                  case OP_default.OP_MAX:
+                    return largerBigNumber(bn1, bn2);
+                  default:
+                    return new BigNumber(0);
+                }
+              })();
+              this.pushStack(resultBnArithmetic.toScriptNum());
+              if (currentOpcode === OP_default.OP_NUMEQUALVERIFY) {
+                if (!this.castToBool(this.stackTop()))
+                  this.scriptEvaluationError("OP_NUMEQUALVERIFY requires the top stack item to be truthy.");
+                this.popStack();
+              }
+            })();
             break;
           }
           case OP_default.OP_WITHIN:
-            if (this.stack.length < 3)
-              this.scriptEvaluationError("OP_WITHIN requires at least three items to be on the stack.");
-            bn3 = BigNumber.fromScriptNum(this.popStack(), !this.isRelaxed());
-            bn2 = BigNumber.fromScriptNum(this.popStack(), !this.isRelaxed());
-            bn1 = BigNumber.fromScriptNum(this.popStack(), !this.isRelaxed());
+            this.requireStackItems(3, "OP_WITHIN requires at least three items to be on the stack.");
+            bn3 = this.readScriptNumber(this.popStack());
+            bn2 = this.readScriptNumber(this.popStack());
+            bn1 = this.readScriptNumber(this.popStack());
             fValue = bn1.cmp(bn2) >= 0 && bn1.cmp(bn3) < 0;
             this.pushStack(fValue ? [1] : []);
             break;
@@ -11850,21 +12477,23 @@ ${ifStackInfo}`;
           case OP_default.OP_SHA256:
           case OP_default.OP_HASH160:
           case OP_default.OP_HASH256: {
-            if (this.stack.length < 1)
-              this.scriptEvaluationError(`${OP_default[currentOpcode]} requires at least one item to be on the stack.`);
-            buf = this.popStack();
-            let hashResult = [];
-            if (currentOpcode === OP_default.OP_RIPEMD160)
-              hashResult = ripemd160(buf);
-            else if (currentOpcode === OP_default.OP_SHA1)
-              hashResult = sha1(buf);
-            else if (currentOpcode === OP_default.OP_SHA256)
-              hashResult = sha256(buf);
-            else if (currentOpcode === OP_default.OP_HASH160)
-              hashResult = hash160(buf);
-            else if (currentOpcode === OP_default.OP_HASH256)
-              hashResult = hash256(buf);
-            this.pushStack(hashResult);
+            ;
+            (() => {
+              this.requireStackItems(1, `${OP_default[currentOpcode]} requires at least one item to be on the stack.`);
+              buf = this.popStack();
+              let hashResult = [];
+              if (currentOpcode === OP_default.OP_RIPEMD160)
+                hashResult = ripemd160(buf);
+              else if (currentOpcode === OP_default.OP_SHA1)
+                hashResult = sha1(buf);
+              else if (currentOpcode === OP_default.OP_SHA256)
+                hashResult = sha256(buf);
+              else if (currentOpcode === OP_default.OP_HASH160)
+                hashResult = hash160(buf);
+              else if (currentOpcode === OP_default.OP_HASH256)
+                hashResult = hash256(buf);
+              this.pushStack(hashResult);
+            })();
             break;
           }
           case OP_default.OP_CODESEPARATOR:
@@ -11872,237 +12501,399 @@ ${ifStackInfo}`;
             break;
           case OP_default.OP_CHECKSIG:
           case OP_default.OP_CHECKSIGVERIFY: {
-            if (this.stack.length < 2)
-              this.scriptEvaluationError(`${OP_default[currentOpcode]} requires at least two items to be on the stack.`);
-            bufPubkey = this.popStack();
-            bufSig = this.popStack();
-            if (!this.checkSignatureEncoding(bufSig) || !this.checkPublicKeyEncoding(bufPubkey)) {
-              this.scriptEvaluationError(`${OP_default[currentOpcode]} requires correct encoding for the public key and signature.`);
-            }
-            fSuccess = false;
-            if (bufSig.length > 0) {
-              try {
-                sig = TransactionSignature.fromChecksigFormat(bufSig);
-                const scriptForChecksig = this.context === "UnlockingScript" ? this.unlockingScript : this.lockingScript;
-                const scriptCodeChunks = scriptForChecksig.chunks.slice(this.lastCodeSeparator === null ? 0 : this.lastCodeSeparator + 1);
-                subscript = new Script(scriptCodeChunks);
-                subscript.findAndDelete(new Script().writeBin(bufSig));
-                pubkey = PublicKey.fromDER(bufPubkey);
-                fSuccess = this.verifySignature(sig, pubkey, subscript);
-              } catch {
-                fSuccess = false;
+            ;
+            (() => {
+              this.requireStackItems(2, `${OP_default[currentOpcode]} requires at least two items to be on the stack.`);
+              bufPubkey = this.popStack();
+              bufSig = this.popStack();
+              if (!this.checkSignatureEncoding(bufSig) || !this.checkPublicKeyEncoding(bufPubkey)) {
+                this.scriptEvaluationError(`${OP_default[currentOpcode]} requires correct encoding for the public key and signature.`);
               }
-            }
-            this.pushStack(fSuccess ? [1] : []);
-            if (currentOpcode === OP_default.OP_CHECKSIGVERIFY) {
-              if (!fSuccess)
-                this.scriptEvaluationError("OP_CHECKSIGVERIFY requires that a valid signature is provided.");
-              this.popStack();
-            }
+              fSuccess = (() => {
+                if (bufSig.length === 0)
+                  return false;
+                try {
+                  sig = this.parseChecksigSignature(bufSig);
+                  const scriptForChecksig = this.context === "UnlockingScript" ? this.unlockingScript : this.lockingScript;
+                  let scriptCodeChunks = scriptForChecksig.chunks.slice(this.lastCodeSeparator === null ? 0 : this.lastCodeSeparator + 1);
+                  if (this.context === "UnlockingScript") {
+                    scriptCodeChunks = scriptCodeChunks.concat(this.lockingScript.chunks);
+                  }
+                  subscript = new Script(scriptCodeChunks);
+                  subscript.findAndDelete(new Script().writeBin(bufSig));
+                  pubkey = PublicKey.fromDER(bufPubkey);
+                  return this.verifySignature(sig, pubkey, subscript);
+                } catch {
+                  return false;
+                }
+              })();
+              if (!fSuccess && this.hasFlag("NULLFAIL") && bufSig.length > 0) {
+                this.scriptEvaluationError(`${OP_default[currentOpcode]} requires failing signatures to be empty.`);
+              }
+              this.pushStack(fSuccess ? [1] : []);
+              if (currentOpcode === OP_default.OP_CHECKSIGVERIFY) {
+                if (!fSuccess)
+                  this.scriptEvaluationError("OP_CHECKSIGVERIFY requires that a valid signature is provided.");
+                this.popStack();
+              }
+            })();
             break;
           }
           case OP_default.OP_CHECKMULTISIG:
           case OP_default.OP_CHECKMULTISIGVERIFY: {
-            i = 1;
-            if (this.stack.length < i) {
-              this.scriptEvaluationError(`${OP_default[currentOpcode]} requires at least 1 item for nKeys.`);
-            }
-            const nKeysCountBN = BigNumber.fromScriptNum(this.stackTop(-i), !this.isRelaxed());
-            const nKeysCountBigInt = nKeysCountBN.toBigInt();
-            if (nKeysCountBigInt < 0n || nKeysCountBigInt > maxMultisigKeyCountBigInt) {
-              this.scriptEvaluationError(`${OP_default[currentOpcode]} requires a key count between 0 and ${maxMultisigKeyCount}.`);
-            }
-            nKeysCount = Number(nKeysCountBigInt);
-            const declaredKeyCount = nKeysCount;
-            ikey = ++i;
-            i += nKeysCount;
-            if (this.stack.length < i) {
-              this.scriptEvaluationError(`${OP_default[currentOpcode]} stack too small for nKeys and keys. Need ${i}, have ${this.stack.length}.`);
-            }
-            const nSigsCountBN = BigNumber.fromScriptNum(this.stackTop(-i), !this.isRelaxed());
-            const nSigsCountBigInt = nSigsCountBN.toBigInt();
-            if (nSigsCountBigInt < 0n || nSigsCountBigInt > BigInt(nKeysCount)) {
-              this.scriptEvaluationError(`${OP_default[currentOpcode]} requires the number of signatures to be no greater than the number of keys.`);
-            }
-            nSigsCount = Number(nSigsCountBigInt);
-            const declaredSigCount = nSigsCount;
-            isig = ++i;
-            i += nSigsCount;
-            if (this.stack.length < i) {
-              this.scriptEvaluationError(`${OP_default[currentOpcode]} stack too small for N, keys, M, sigs, and dummy. Need ${i}, have ${this.stack.length}.`);
-            }
-            const baseScriptCMS = this.context === "UnlockingScript" ? this.unlockingScript : this.lockingScript;
-            const subscriptChunksCMS = baseScriptCMS.chunks.slice(this.lastCodeSeparator === null ? 0 : this.lastCodeSeparator + 1);
-            subscript = new Script(subscriptChunksCMS);
-            for (let k = 0; k < nSigsCount; k++) {
-              bufSig = this.stackTop(-isig - k);
-              subscript.findAndDelete(new Script().writeBin(bufSig));
-            }
-            fSuccess = true;
-            while (fSuccess && nSigsCount > 0) {
-              if (nKeysCount === 0) {
-                fSuccess = false;
-                break;
+            ;
+            (() => {
+              i = 1;
+              if (this.stack.length < i) {
+                this.scriptEvaluationError(`${OP_default[currentOpcode]} requires at least 1 item for nKeys.`);
               }
-              bufSig = this.stackTop(-isig);
-              bufPubkey = this.stackTop(-ikey);
-              if (!this.checkSignatureEncoding(bufSig) || !this.checkPublicKeyEncoding(bufPubkey)) {
-                this.scriptEvaluationError(`${OP_default[currentOpcode]} requires correct encoding for the public key and signature.`);
+              const nKeysCountBN = this.readScriptNumber(this.stackTop(-i));
+              const nKeysCountBigInt = nKeysCountBN.toBigInt();
+              const multisigKeyLimitBigInt = this.hasExplicitFlags() && !this.isAfterGenesis() ? BigInt(maxMultisigKeyCountBeforeGenesis) : maxMultisigKeyCountBigInt;
+              if (nKeysCountBigInt < 0n || nKeysCountBigInt > multisigKeyLimitBigInt) {
+                this.scriptEvaluationError(`${OP_default[currentOpcode]} requires a key count between 0 and ${multisigKeyLimitBigInt.toString()}.`);
               }
-              fOk = false;
-              if (bufSig.length > 0) {
-                try {
-                  sig = TransactionSignature.fromChecksigFormat(bufSig);
-                  pubkey = PublicKey.fromDER(bufPubkey);
-                  fOk = this.verifySignature(sig, pubkey, subscript);
-                } catch {
+              nKeysCount = Number(nKeysCountBigInt);
+              const declaredKeyCount = nKeysCount;
+              ikey = ++i;
+              i += nKeysCount;
+              if (this.stack.length < i) {
+                this.scriptEvaluationError(`${OP_default[currentOpcode]} stack too small for nKeys and keys. Need ${i}, have ${this.stack.length}.`);
+              }
+              const nSigsCountBN = this.readScriptNumber(this.stackTop(-i));
+              const nSigsCountBigInt = nSigsCountBN.toBigInt();
+              if (nSigsCountBigInt < 0n || nSigsCountBigInt > BigInt(nKeysCount)) {
+                this.scriptEvaluationError(`${OP_default[currentOpcode]} requires the number of signatures to be no greater than the number of keys.`);
+              }
+              nSigsCount = Number(nSigsCountBigInt);
+              const declaredSigCount = nSigsCount;
+              isig = ++i;
+              i += nSigsCount;
+              if (this.stack.length < i) {
+                this.scriptEvaluationError(`${OP_default[currentOpcode]} stack too small for N, keys, M, sigs, and dummy. Need ${i}, have ${this.stack.length}.`);
+              }
+              const baseScriptCMS = this.context === "UnlockingScript" ? this.unlockingScript : this.lockingScript;
+              const subscriptChunksCMS = baseScriptCMS.chunks.slice(this.lastCodeSeparator === null ? 0 : this.lastCodeSeparator + 1);
+              subscript = new Script(subscriptChunksCMS);
+              let hasNonEmptySignature = false;
+              for (let k = 0; k < nSigsCount; k++) {
+                bufSig = this.stackTop(-isig - k);
+                if (bufSig.length > 0)
+                  hasNonEmptySignature = true;
+                subscript.findAndDelete(new Script().writeBin(bufSig));
+              }
+              ;
+              (() => {
+                fSuccess = true;
+                while (fSuccess && nSigsCount > 0) {
+                  if (nKeysCount === 0) {
+                    fSuccess = false;
+                    break;
+                  }
+                  bufSig = this.stackTop(-isig);
+                  bufPubkey = this.stackTop(-ikey);
+                  if (!this.checkSignatureEncoding(bufSig) || !this.checkPublicKeyEncoding(bufPubkey)) {
+                    this.scriptEvaluationError(`${OP_default[currentOpcode]} requires correct encoding for the public key and signature.`);
+                  }
                   fOk = false;
+                  if (bufSig.length > 0) {
+                    try {
+                      sig = this.parseChecksigSignature(bufSig);
+                      pubkey = PublicKey.fromDER(bufPubkey);
+                      fOk = this.verifySignature(sig, pubkey, subscript);
+                    } catch {
+                      fOk = false;
+                    }
+                  }
+                  if (fOk) {
+                    isig++;
+                    nSigsCount--;
+                  }
+                  ikey++;
+                  nKeysCount--;
+                  if (nSigsCount > nKeysCount) {
+                    fSuccess = false;
+                  }
                 }
-              }
-              if (fOk) {
-                isig++;
-                nSigsCount--;
-              }
-              ikey++;
-              nKeysCount--;
-              if (nSigsCount > nKeysCount) {
-                fSuccess = false;
-              }
-            }
-            const itemsConsumedByOp = 1 + // N_val
-            declaredKeyCount + // keys
-            1 + // M_val
-            declaredSigCount + // sigs
-            1;
-            let popCount = itemsConsumedByOp - 1;
-            while (popCount > 0) {
-              this.popStack();
-              popCount--;
-            }
-            if (this.stack.length < 1) {
-              this.scriptEvaluationError(`${OP_default[currentOpcode]} requires an extra item (dummy) to be on the stack.`);
-            }
-            const dummyBuf = this.popStack();
-            if (!this.isRelaxed() && dummyBuf.length > 0) {
-              this.scriptEvaluationError(`${OP_default[currentOpcode]} requires the extra stack item (dummy) to be empty.`);
-            }
-            this.pushStack(fSuccess ? [1] : []);
-            if (currentOpcode === OP_default.OP_CHECKMULTISIGVERIFY) {
-              if (!fSuccess)
-                this.scriptEvaluationError("OP_CHECKMULTISIGVERIFY requires that a sufficient number of valid signatures are provided.");
-              this.popStack();
-            }
+              })();
+              (() => {
+                if (!fSuccess && this.hasFlag("NULLFAIL") && hasNonEmptySignature) {
+                  this.scriptEvaluationError(`${OP_default[currentOpcode]} requires failing signatures to be empty.`);
+                }
+                const itemsConsumedByOp = 1 + // N_val
+                declaredKeyCount + // keys
+                1 + // M_val
+                declaredSigCount + // sigs
+                1;
+                let popCount = itemsConsumedByOp - 1;
+                while (popCount > 0) {
+                  this.popStack();
+                  popCount--;
+                }
+                this.requireStackItems(1, `${OP_default[currentOpcode]} requires an extra item (dummy) to be on the stack.`);
+                const dummyBuf = this.popStack();
+                if (this.shouldEnforceNullDummy() && dummyBuf.length > 0) {
+                  this.scriptEvaluationError(`${OP_default[currentOpcode]} requires the extra stack item (dummy) to be empty.`);
+                }
+                this.pushStack(fSuccess ? [1] : []);
+                if (currentOpcode === OP_default.OP_CHECKMULTISIGVERIFY) {
+                  if (!fSuccess)
+                    this.scriptEvaluationError("OP_CHECKMULTISIGVERIFY requires that a sufficient number of valid signatures are provided.");
+                  this.popStack();
+                }
+              })();
+            })();
             break;
           }
           case OP_default.OP_CAT: {
-            if (this.stack.length < 2)
-              this.scriptEvaluationError("OP_CAT requires at least two items to be on the stack.");
-            buf2 = this.popStack();
-            buf1 = this.popStack();
-            const catResult = buf1.concat(buf2);
-            if (catResult.length > maxScriptElementSize)
-              this.scriptEvaluationError(`It's not currently possible to push data larger than ${maxScriptElementSize} bytes.`);
-            this.pushStack(catResult);
+            ;
+            (() => {
+              this.requireStackItems(2, "OP_CAT requires at least two items to be on the stack.");
+              buf2 = this.popStack();
+              buf1 = this.popStack();
+              const catResult = buf1.concat(buf2);
+              if (catResult.length > this.maxPushSize())
+                this.scriptEvaluationError(`It's not currently possible to push data larger than ${this.maxPushSize()} bytes.`);
+              this.pushStack(catResult);
+            })();
             break;
           }
           case OP_default.OP_SPLIT: {
-            if (this.stack.length < 2)
-              this.scriptEvaluationError("OP_SPLIT requires at least two items to be on the stack.");
-            const posBuf = this.popStack();
-            const dataToSplit = this.popStack();
-            const splitIndexBigInt = BigNumber.fromScriptNum(posBuf, !this.isRelaxed()).toBigInt();
-            if (splitIndexBigInt < 0n || splitIndexBigInt > BigInt(dataToSplit.length)) {
-              this.scriptEvaluationError("OP_SPLIT requires the first stack item to be a non-negative number less than or equal to the size of the second-from-top stack item.");
-            }
-            const splitIndex = Number(splitIndexBigInt);
-            this.pushStack(dataToSplit.slice(0, splitIndex));
-            this.pushStack(dataToSplit.slice(splitIndex));
+            ;
+            (() => {
+              this.requireStackItems(2, "OP_SPLIT requires at least two items to be on the stack.");
+              const posBuf = this.popStack();
+              const dataToSplit = this.popStack();
+              const splitIndexBigInt = this.readScriptNumber(posBuf).toBigInt();
+              if (splitIndexBigInt < 0n || splitIndexBigInt > BigInt(dataToSplit.length)) {
+                this.scriptEvaluationError("OP_SPLIT requires the first stack item to be a non-negative number less than or equal to the size of the second-from-top stack item.");
+              }
+              const splitIndex = Number(splitIndexBigInt);
+              this.pushStack(dataToSplit.slice(0, splitIndex));
+              this.pushStack(dataToSplit.slice(splitIndex));
+            })();
             break;
           }
           case OP_default.OP_NUM2BIN: {
-            if (this.stack.length < 2)
-              this.scriptEvaluationError("OP_NUM2BIN requires at least two items to be on the stack.");
-            const sizeBigInt = BigNumber.fromScriptNum(this.popStack(), !this.isRelaxed()).toBigInt();
-            if (sizeBigInt > BigInt(maxScriptElementSize) || sizeBigInt < 0n) {
-              this.scriptEvaluationError(`It's not currently possible to push data larger than ${maxScriptElementSize} bytes or negative size.`);
-            }
-            size = Number(sizeBigInt);
-            let rawnum = this.popStack();
-            rawnum = minimallyEncode(rawnum);
-            if (rawnum.length > size) {
-              this.scriptEvaluationError("OP_NUM2BIN requires that the size expressed in the top stack item is large enough to hold the value expressed in the second-from-top stack item.");
-            }
-            if (rawnum.length === size) {
-              this.pushStack(rawnum);
-              break;
-            }
-            const resultN2B = new Array(size).fill(0);
-            let signbit = 0;
-            if (rawnum.length > 0) {
-              signbit = rawnum[rawnum.length - 1] & 128;
-              rawnum[rawnum.length - 1] &= 127;
-            }
-            for (let k = 0; k < rawnum.length; k++) {
-              resultN2B[k] = rawnum[k];
-            }
-            if (signbit !== 0) {
-              resultN2B[size - 1] |= 128;
-            }
-            this.pushStack(resultN2B);
+            ;
+            (() => {
+              this.requireStackItems(2, "OP_NUM2BIN requires at least two items to be on the stack.");
+              const sizeBigInt = this.readScriptNumber(this.popStack()).toBigInt();
+              const maxPushSize = this.maxPushSize();
+              if (Number.isFinite(maxPushSize) && sizeBigInt > BigInt(maxPushSize) || sizeBigInt < 0n) {
+                this.scriptEvaluationError(`It's not currently possible to push data larger than ${maxPushSize} bytes or negative size.`);
+              }
+              if (sizeBigInt > maxJavaScriptArrayLength) {
+                throw new ScriptResourceLimitError("element-size", maxJavaScriptArrayLength, sizeBigInt);
+              }
+              size = Number(sizeBigInt);
+              let rawnum = this.popStack();
+              rawnum = minimallyEncode(rawnum);
+              if (rawnum.length > size) {
+                this.scriptEvaluationError("OP_NUM2BIN requires that the size expressed in the top stack item is large enough to hold the value expressed in the second-from-top stack item.");
+              }
+              if (rawnum.length === size) {
+                this.pushStack(rawnum);
+                return;
+              }
+              const resultN2B = Array.from({ length: size }, () => 0);
+              let signbit = 0;
+              if (rawnum.length > 0) {
+                signbit = rawnum.at(-1) & 128;
+                rawnum[rawnum.length - 1] &= 127;
+              }
+              for (let k = 0; k < rawnum.length; k++) {
+                resultN2B[k] = rawnum[k];
+              }
+              if (signbit !== 0) {
+                resultN2B[size - 1] |= 128;
+              }
+              this.pushStack(resultN2B);
+            })();
             break;
           }
           case OP_default.OP_BIN2NUM: {
-            if (this.stack.length < 1)
-              this.scriptEvaluationError("OP_BIN2NUM requires at least one item to be on the stack.");
-            buf1 = this.popStack();
-            const b2nResult = minimallyEncode(buf1);
-            if (!isMinimallyEncodedHelper(b2nResult)) {
-              this.scriptEvaluationError("OP_BIN2NUM requires that the resulting number is valid.");
-            }
-            this.pushStack(b2nResult);
+            ;
+            (() => {
+              this.requireStackItems(1, "OP_BIN2NUM requires at least one item to be on the stack.");
+              buf1 = this.popStack();
+              const b2nResult = minimallyEncode(buf1);
+              if (!isMinimallyEncodedHelper(b2nResult)) {
+                this.scriptEvaluationError("OP_BIN2NUM requires that the resulting number is valid.");
+              }
+              this.pushStack(b2nResult);
+            })();
             break;
           }
           default:
             this.scriptEvaluationError(`Invalid opcode ${currentOpcode} (pc=${this.programCounter}).`);
         }
       }
-      this.programCounter++;
+      this.advanceAfterStep(currentScript);
       return true;
     }
     /**
      * @method validate
      * Validates the spend action by interpreting the locking and unlocking scripts.
-     * @returns {boolean} Returns true if the scripts are valid and the spend is legitimate, otherwise false.
+     * @param {SpendVerificationContext} context - Optional explicit consensus or
+     *        policy context passed to a registered script backend.
+     * @returns {boolean} Returns true when the spend is valid.
+     * @throws {ScriptEvaluationError} If script validation fails.
+     * @throws {ScriptResourceLimitError} If a local interpreter resource is
+     *         exhausted before validity can be determined.
      * @example
-     * if (spend.validate()) {
-     *   console.log("Spend is valid!");
-     * } else {
-     *   console.log("Invalid spend!");
-     * }
+     * spend.validate()
+     * console.log("Spend is valid!")
      */
-    validate() {
-      if (!this.isRelaxed() && !this.unlockingScript.isPushOnly()) {
+    validate(context) {
+      const verifier = scriptVerificationBackend();
+      if (verifier?.verifySpendSync !== void 0 && (verifier.isReady?.() ?? true) && (context === void 0 ? verifier.shouldVerifySpend?.(this) : verifier.shouldVerifySpend?.(this, context)) !== false) {
+        const valid = context === void 0 ? verifier.verifySpendSync(this) : verifier.verifySpendSync(this, context);
+        if (!valid) {
+          this.scriptEvaluationError("The selected script-verification backend rejected the spend.");
+        }
+        return true;
+      }
+      return this.validateJavaScript();
+    }
+    /**
+     * Runs the original TypeScript interpreter explicitly, bypassing any
+     * registered optional backend.
+     */
+    validateJavaScript() {
+      this.reset();
+      if (this.shouldEnforceSigPushOnly() && !this.unlockingScript.isPushOnly()) {
         this.scriptEvaluationError("Unlocking scripts can only contain push operations, and no other opcodes.");
       }
-      while (this.step()) {
-        if (this.context === "LockingScript" && this.programCounter >= this.lockingScript.chunks.length) {
-          break;
+      const originalLockingScript = this.lockingScript;
+      const shouldEvaluateP2SH = this.hasFlag("P2SH") && !this.isAfterGenesis() && this.isP2SHLockingScript(this.lockingScript);
+      if (shouldEvaluateP2SH && !this.unlockingScript.isPushOnly()) {
+        this.scriptEvaluationError("P2SH unlocking scripts can only contain push operations.");
+      }
+      this.runScript("UnlockingScript");
+      const stackAfterUnlockingScript = this.stack.map((item) => item.slice());
+      this.runScript("LockingScript");
+      this.requireTruthyTopStack();
+      try {
+        if (shouldEvaluateP2SH) {
+          if (stackAfterUnlockingScript.length === 0) {
+            this.scriptEvaluationError("P2SH evaluation requires a redeem script on the stack.");
+          }
+          const redeemScriptBytes = stackAfterUnlockingScript.pop();
+          if (redeemScriptBytes === void 0) {
+            this.scriptEvaluationError("P2SH evaluation requires a redeem script on the stack.");
+            return false;
+          }
+          this.setStack(stackAfterUnlockingScript);
+          const redeemScript = Script.fromBinary(redeemScriptBytes);
+          this.lockingScript = new LockingScript(redeemScript.chunks);
+          this.runScript("LockingScript");
         }
+      } finally {
+        this.lockingScript = originalLockingScript;
+      }
+      if (this.shouldEnforceCleanStack() && this.stack.length !== 1) {
+        this.scriptEvaluationError(`The clean stack rule requires exactly one item to be on the stack after script execution, found ${this.stack.length}.`);
+      }
+      this.requireTruthyTopStack();
+      return true;
+    }
+    /**
+     * Validates this spend with an asynchronous pluggable backend. This is the
+     * native/WASM counterpart to {@link validate}. An adaptive backend may decline
+     * the Spend before execution, in which case the existing JavaScript validator
+     * is used. Once selected, backend errors remain authoritative and propagate.
+     * @param verifier - The backend used when it accepts this Spend.
+     * @param context - Optional explicit consensus or policy context. Transaction
+     * version is never used as a substitute for this context.
+     */
+    async validateWith(verifier, context) {
+      const shouldVerify = context === void 0 ? verifier.shouldVerifySpend?.(this) : verifier.shouldVerifySpend?.(this, context);
+      if (shouldVerify === false) {
+        return this.validateJavaScript();
+      }
+      return context === void 0 ? await verifier.verifySpend(this) : await verifier.verifySpend(this, context);
+    }
+    /**
+     * Serializes the ordinary transaction represented by this Spend. The source
+     * output is intentionally excluded and is supplied separately to a Spend
+     * verifier, avoiding an EF construction and parse for one-input validation.
+     */
+    toTransactionUint8Array() {
+      const currentInput = {
+        sourceTXID: this.sourceTXID,
+        sourceOutputIndex: this.sourceOutputIndex,
+        unlockingScript: this.unlockingScript,
+        sequence: this.inputSequence
+      };
+      const inputs = this.allInputs ?? [
+        ...this.otherInputs.slice(0, this.inputIndex),
+        currentInput,
+        ...this.otherInputs.slice(this.inputIndex)
+      ];
+      if (this.inputIndex < 0 || this.inputIndex >= inputs.length) {
+        throw new RangeError("Spend input index is out of range");
+      }
+      const writer = new WriterUint8Array();
+      writer.writeUInt32LE(this.transactionVersion);
+      writer.writeVarIntNum(inputs.length);
+      for (let index = 0; index < inputs.length; index++) {
+        const input = index === this.inputIndex ? currentInput : inputs[index];
+        const sourceTXID = input.sourceTXID ?? input.sourceTransaction?.id("hex");
+        if (sourceTXID === void 0)
+          throw new Error(`Input ${index} is missing its source transaction ID`);
+        if (input.unlockingScript === void 0)
+          throw new Error(`Input ${index} is missing its unlocking script`);
+        writer.writeReverse(toArray2(sourceTXID, "hex"));
+        writer.writeUInt32LE(input.sourceOutputIndex);
+        const unlockingScript = input.unlockingScript.toUint8Array();
+        writer.writeVarIntNum(unlockingScript.length);
+        writer.write(unlockingScript);
+        writer.writeUInt32LE(input.sequence ?? 4294967295);
+      }
+      writer.writeVarIntNum(this.outputs.length);
+      for (const output of this.outputs) {
+        writer.writeUInt64LE(output.satoshis ?? 0);
+        const lockingScript = output.lockingScript.toUint8Array();
+        writer.writeVarIntNum(lockingScript.length);
+        writer.write(lockingScript);
+      }
+      writer.writeUInt32LE(this.lockTime);
+      return writer.toUint8Array();
+    }
+    runScript(context) {
+      this.context = context;
+      this.programCounter = 0;
+      this.ifStack = [];
+      this.elseStack = [];
+      this.returningFromConditional = false;
+      this.clearAltStack();
+      this.lastCodeSeparator = null;
+      const script = context === "UnlockingScript" ? this.unlockingScript : this.lockingScript;
+      if (this.hasExplicitFlags() && !this.isAfterGenesis() && script.toUint8Array().length > maxScriptSizeBeforeGenesis) {
+        this.scriptEvaluationError(`Script size exceeds ${maxScriptSizeBeforeGenesis} bytes.`);
+      }
+      while (this.programCounter < script.chunks.length) {
+        this.step();
       }
       if (this.ifStack.length > 0) {
         this.scriptEvaluationError("Every OP_IF, OP_NOTIF, or OP_ELSE must be terminated with OP_ENDIF prior to the end of the script.");
       }
-      if (!this.isRelaxed()) {
-        if (this.stack.length !== 1) {
-          this.scriptEvaluationError(`The clean stack rule requires exactly one item to be on the stack after script execution, found ${this.stack.length}.`);
-        }
-      }
+      this.ifStack = [];
+      this.elseStack = [];
+      this.clearAltStack();
+      this.lastCodeSeparator = null;
+    }
+    isP2SHLockingScript(script) {
+      const chunks = script.chunks;
+      return chunks.length === 3 && chunks[0].op === OP_default.OP_HASH160 && chunks[1].op === 20 && Array.isArray(chunks[1].data) && chunks[1].data.length === 20 && chunks[2].op === OP_default.OP_EQUAL;
+    }
+    requireTruthyTopStack() {
       if (this.stack.length === 0) {
         this.scriptEvaluationError("The top stack element must be truthy after script evaluation (stack is empty).");
       } else if (!this.castToBool(this.stackTop())) {
         this.scriptEvaluationError("The top stack element must be truthy after script evaluation.");
       }
-      return true;
     }
     castToBool(val) {
       if (val.length === 0)
@@ -12149,7 +12940,6 @@ ${ifStackInfo}`;
   }
   function resolveSourceDetails(tx, inputIndex, providedSourceSatoshis, providedLockingScript) {
     const input = tx.inputs[inputIndex];
-    const otherInputs = tx.inputs.filter((_, index) => index !== inputIndex);
     const sourceTXID = input.sourceTXID ?? input.sourceTransaction?.id("hex");
     if (sourceTXID == null || sourceTXID === void 0) {
       throw new Error("The input sourceTXID or sourceTransaction is required for transaction signing.");
@@ -12165,23 +12955,35 @@ ${ifStackInfo}`;
     if (lockingScript == null) {
       throw new Error("The lockingScript or input sourceTransaction is required for transaction signing.");
     }
-    return { sourceTXID, sourceSatoshis, lockingScript, otherInputs };
+    return {
+      sourceTXID,
+      sourceSatoshis,
+      lockingScript,
+      allInputs: tx.inputs,
+      // Preserve the public helper's legacy result without paying for it unless a
+      // caller explicitly reads the property.
+      get otherInputs() {
+        return tx.inputs.filter((_, index) => index !== inputIndex);
+      }
+    };
   }
   function formatPreimage(params) {
-    const { tx, inputIndex, signatureScope, sourceTXID, sourceSatoshis, lockingScript, otherInputs, inputSequence } = params;
+    const { tx, inputIndex, signatureScope, sourceTXID, sourceSatoshis, lockingScript, otherInputs, allInputs, inputSequence } = params;
     const input = tx.inputs[inputIndex];
     return TransactionSignature.format({
       sourceTXID,
       sourceOutputIndex: verifyNotNull(input.sourceOutputIndex, "input.sourceOutputIndex must have value"),
       sourceSatoshis,
       transactionVersion: tx.version,
-      otherInputs,
+      otherInputs: otherInputs ?? [],
+      allInputs,
       inputIndex,
       outputs: tx.outputs,
       inputSequence: inputSequence ?? verifyNotNull(input.sequence, "input.sequence must have value"),
       subscript: lockingScript,
       lockTime: tx.lockTime,
-      scope: signatureScope
+      scope: signatureScope,
+      cache: tx.getSignatureHashCache()
     });
   }
 
@@ -12244,12 +13046,22 @@ ${ifStackInfo}`;
             sourceTXID: resolved.sourceTXID,
             sourceSatoshis: resolved.sourceSatoshis,
             lockingScript: resolved.lockingScript,
-            otherInputs: resolved.otherInputs
+            allInputs: resolved.allInputs
           });
-          const rawSignature = privateKey.sign(sha256(preimage));
+          const preimageHash = sha256(preimage);
+          const signingBackend = readyAsyncCryptoBackend("signDigest");
+          const publicKeyBackend = readyAsyncCryptoBackend("publicKeyFromPrivate");
+          const privateKeyBytes = signingBackend === void 0 && publicKeyBackend === void 0 ? void 0 : Uint8Array.from(privateKey.toArray("be", 32));
+          const rawSignature = signingBackend === void 0 ? privateKey.sign(preimageHash) : Signature.fromDER(Array.from(validateAsyncCryptoBytes("signDigest", await signingBackend.signDigest(
+            privateKeyBytes,
+            // PrivateKey.sign hashes its argument before ECDSA signing.
+            // Preserve that historical double-SHA256 contract when passing a
+            // digest to a backend that signs the supplied bytes directly.
+            Uint8Array.from(sha256(preimageHash))
+          ))));
           const sig = new TransactionSignature(rawSignature.r, rawSignature.s, signatureScope);
           const sigForScript = sig.toChecksigFormat();
-          const pubkeyForScript = privateKey.toPublicKey().encode(true);
+          const pubkeyForScript = publicKeyBackend === void 0 ? privateKey.toPublicKey().encode(true) : Array.from(validateCompressedPublicKey(await publicKeyBackend.publicKeyFromPrivate(privateKeyBytes)));
           return new UnlockingScript([
             { op: sigForScript.length, data: sigForScript },
             { op: pubkeyForScript.length, data: pubkeyForScript }
@@ -12261,6 +13073,13 @@ ${ifStackInfo}`;
       };
     }
   };
+  function validateCompressedPublicKey(value) {
+    const bytes2 = validateAsyncCryptoBytes("publicKeyFromPrivate", value, 33);
+    if (bytes2[0] !== 2 && bytes2[0] !== 3) {
+      throw new Error("publicKeyFromPrivate returned an invalid compressed public key");
+    }
+    return bytes2;
+  }
 
   // node_modules/@bsv/sdk/dist/esm/src/transaction/fee-models/SatoshisPerKilobyte.js
   var SatoshisPerKilobyte = class {
@@ -12306,7 +13125,7 @@ ${ifStackInfo}`;
         } else if (typeof input.unlockingScriptTemplate === "object") {
           scriptLength = await input.unlockingScriptTemplate.estimateLength(tx, i);
         } else {
-          throw new Error("All inputs must have an unlocking script or an unlocking script template for sat/kb fee computation.");
+          throw new TypeError("All inputs must have an unlocking script or an unlocking script template for sat/kb fee computation.");
         }
         size += getVarIntSize(scriptLength);
         size += scriptLength;
@@ -12347,9 +13166,7 @@ ${ifStackInfo}`;
      * @returns The singleton LivePolicy instance
      */
     static getInstance(cacheValidityMs = 5 * 60 * 1e3) {
-      if (!_LivePolicy.instance) {
-        _LivePolicy.instance = new _LivePolicy(cacheValidityMs);
-      }
+      _LivePolicy.instance ??= new _LivePolicy(cacheValidityMs);
       return _LivePolicy.instance;
     }
     /**
@@ -12470,16 +13287,19 @@ ${ifStackInfo}`;
         throw new Error("No method available to perform HTTP request");
       }
     };
-    if (typeof window !== "undefined" && typeof window.fetch === "function") {
-      return new FetchHttpClient(window.fetch.bind(window));
-    } else if (typeof __require !== "undefined") {
-      try {
-        const https = __require("https");
-        return new NodejsHttpClient(https);
-      } catch (e) {
-        return noHttpClient;
-      }
-    } else {
+    if (globalThis.window !== void 0 && typeof globalThis.window.fetch === "function") {
+      return new FetchHttpClient(globalThis.window.fetch.bind(globalThis.window));
+    } else if (typeof globalThis.fetch === "function") {
+      return new FetchHttpClient(globalThis.fetch.bind(globalThis));
+    }
+    const nodeRequire = typeof __require === "function" ? __require : void 0;
+    if (nodeRequire === void 0) {
+      return noHttpClient;
+    }
+    try {
+      const https = nodeRequire(["node", "https"].join(":"));
+      return new NodejsHttpClient(https);
+    } catch {
       return noHttpClient;
     }
   }
@@ -12487,6 +13307,78 @@ ${ifStackInfo}`;
   // node_modules/@bsv/sdk/dist/esm/src/transaction/broadcasters/ARC.js
   function defaultDeploymentId() {
     return `ts-sdk-${toHex(Random_default(16))}`;
+  }
+  var ARC_ERROR_STATUSES = /* @__PURE__ */ new Set([
+    "DOUBLE_SPEND_ATTEMPTED",
+    "REJECTED",
+    "INVALID",
+    "MALFORMED",
+    "MINED_IN_STALE_BLOCK"
+  ]);
+  function transactionHex(tx) {
+    try {
+      return tx.toHexEF();
+    } catch (error) {
+      if (error.message === "All inputs must have source transactions when serializing to EF format")
+        return tx.toHex();
+      throw error;
+    }
+  }
+  function successfulArcResponse(data) {
+    const { txid, extraInfo, txStatus, competingTxs } = data;
+    const upperStatus = txStatus?.toUpperCase();
+    const isOrphan = extraInfo?.toUpperCase().includes("ORPHAN") || upperStatus?.includes("ORPHAN");
+    if (ARC_ERROR_STATUSES.has(upperStatus) || isOrphan) {
+      const failure = {
+        status: "error",
+        code: txStatus ?? "UNKNOWN",
+        txid,
+        description: `${txStatus ?? ""} ${extraInfo ?? ""}`.trim()
+      };
+      if (competingTxs != null)
+        failure.more = { competingTxs };
+      return failure;
+    }
+    const response = {
+      status: "success",
+      txid,
+      message: `${txStatus} ${extraInfo}`
+    };
+    if (competingTxs != null)
+      response.competingTxs = competingTxs;
+    return response;
+  }
+  function parseArcFailureData(data) {
+    if (typeof data !== "string")
+      return data;
+    try {
+      return JSON.parse(data);
+    } catch {
+      return data;
+    }
+  }
+  function failedArcResponse(status, responseData) {
+    const failure = {
+      status: "error",
+      code: typeof status === "number" || typeof status === "string" ? status.toString() : "ERR_UNKNOWN",
+      description: "Unknown error"
+    };
+    const data = parseArcFailureData(responseData);
+    if (data == null || typeof data !== "object")
+      return failure;
+    failure.more = data;
+    if ("txid" in data && typeof data.txid === "string")
+      failure.txid = data.txid;
+    if ("detail" in data && typeof data.detail === "string")
+      failure.description = data.detail;
+    return failure;
+  }
+  function caughtArcResponse(error) {
+    return {
+      status: "error",
+      code: "500",
+      description: error != null && typeof error === "object" && "message" in error && typeof error.message === "string" ? error.message : "Internal Server Error"
+    };
   }
   var ARC = class {
     URL;
@@ -12546,87 +13438,16 @@ ${ifStackInfo}`;
      * @returns {Promise<BroadcastResponse | BroadcastFailure>} A promise that resolves to either a success or failure response.
      */
     async broadcast(tx) {
-      let rawTx;
-      try {
-        rawTx = tx.toHexEF();
-      } catch (error) {
-        if (error.message === "All inputs must have source transactions when serializing to EF format") {
-          rawTx = tx.toHex();
-        } else {
-          throw error;
-        }
-      }
       const requestOptions = {
         method: "POST",
         headers: this.requestHeaders(),
-        data: { rawTx }
+        data: { rawTx: transactionHex(tx) }
       };
       try {
         const response = await this.httpClient.request(`${this.URL}/v1/tx`, requestOptions);
-        if (response.ok) {
-          const { txid, extraInfo, txStatus, competingTxs } = response.data;
-          const errorStatuses = [
-            "DOUBLE_SPEND_ATTEMPTED",
-            "REJECTED",
-            "INVALID",
-            "MALFORMED",
-            "MINED_IN_STALE_BLOCK"
-          ];
-          const isOrphan = extraInfo?.toUpperCase().includes("ORPHAN") || txStatus?.toUpperCase().includes("ORPHAN");
-          if (errorStatuses.includes(txStatus?.toUpperCase()) || isOrphan) {
-            const failure = {
-              status: "error",
-              code: txStatus ?? "UNKNOWN",
-              txid,
-              description: `${txStatus ?? ""} ${extraInfo ?? ""}`.trim()
-            };
-            if (competingTxs != null) {
-              failure.more = { competingTxs };
-            }
-            return failure;
-          }
-          const broadcastRes = {
-            status: "success",
-            txid,
-            message: `${txStatus} ${extraInfo}`
-          };
-          if (competingTxs != null) {
-            broadcastRes.competingTxs = competingTxs;
-          }
-          return broadcastRes;
-        } else {
-          const st = typeof response.status;
-          const r2 = {
-            status: "error",
-            code: st === "number" || st === "string" ? response.status.toString() : "ERR_UNKNOWN",
-            description: "Unknown error"
-          };
-          let d = response.data;
-          if (typeof d === "string") {
-            try {
-              d = JSON.parse(response.data);
-            } catch {
-            }
-          }
-          if (typeof d === "object") {
-            if (d !== null) {
-              r2.more = d;
-            }
-            if (d != null && typeof d.txid === "string") {
-              r2.txid = d.txid;
-            }
-            if (d != null && "detail" in d && typeof d.detail === "string") {
-              r2.description = d.detail;
-            }
-          }
-          return r2;
-        }
+        return response.ok ? successfulArcResponse(response.data) : failedArcResponse(response.status, response.data);
       } catch (error) {
-        return {
-          status: "error",
-          code: "500",
-          description: typeof error.message === "string" ? error.message : "Internal Server Error"
-        };
+        return caughtArcResponse(error);
       }
     }
     /**
@@ -12637,16 +13458,7 @@ ${ifStackInfo}`;
      * @returns {Promise<Array<object>>} A promise that resolves to an array of objects.
      */
     async broadcastMany(txs) {
-      const rawTxs = txs.map((tx) => {
-        try {
-          return { rawTx: tx.toHexEF() };
-        } catch (error) {
-          if (error.message === "All inputs must have source transactions when serializing to EF format") {
-            return { rawTx: tx.toHex() };
-          }
-          throw error;
-        }
-      });
+      const rawTxs = txs.map((tx) => ({ rawTx: transactionHex(tx) }));
       const requestOptions = {
         method: "POST",
         headers: this.requestHeaders(),
@@ -12656,11 +13468,7 @@ ${ifStackInfo}`;
         const response = await this.httpClient.request(`${this.URL}/v1/txs`, requestOptions);
         return response.data;
       } catch (error) {
-        const errorResponse = {
-          status: "error",
-          code: "500",
-          description: typeof error.message === "string" ? error.message : "Internal Server Error"
-        };
+        const errorResponse = caughtArcResponse(error);
         return txs.map(() => errorResponse);
       }
     }
@@ -12738,6 +13546,32 @@ ${ifStackInfo}`;
   }
 
   // node_modules/@bsv/sdk/dist/esm/src/transaction/MerklePath.js
+  function hashPair(left, right) {
+    return toHex(hash256(toArray2((left ?? "") + (right ?? ""), "hex").reverse()).reverse());
+  }
+  function cachedMerkleRoot(nodeKey, workingHash, treeHeight, nodeHashCache) {
+    const cachedNodeHash = nodeHashCache.get(nodeKey);
+    if (cachedNodeHash == null)
+      return void 0;
+    if (cachedNodeHash !== workingHash)
+      throw new Error("Mismatched roots");
+    const root = nodeHashCache.get(`${treeHeight}:0`);
+    if (root == null)
+      throw new Error("Mismatched roots");
+    return root;
+  }
+  function nextCachedHash(workingHash, leaf, offset, index, height, isLastOddNode) {
+    if (leaf == null) {
+      if (isLastOddNode)
+        return hashPair(workingHash, workingHash);
+      throw new Error(`Missing hash for index ${index} at height ${height}`);
+    }
+    if (leaf.duplicate === true)
+      return hashPair(workingHash, workingHash);
+    if (offset % 2 === 1)
+      return hashPair(leaf.hash, workingHash);
+    return hashPair(workingHash, leaf.hash);
+  }
   var MerklePath = class _MerklePath {
     blockHeight;
     path;
@@ -12751,10 +13585,10 @@ ${ifStackInfo}`;
     static fromHex(hex) {
       return _MerklePath.fromBinary(toArray2(hex, "hex"));
     }
-    static fromReader(reader, legalOffsetsOnly = true) {
+    static fromReader(reader, legalOffsetsOnly = true, validateRoots = true) {
       const blockHeight = reader.readVarIntNum();
       const treeHeight = reader.readUInt8();
-      const path = new Array(treeHeight).fill(null).map(() => []);
+      const path = Array.from({ length: treeHeight }).fill(null).map(() => []);
       let flags, offset, nLeavesAtThisHeight;
       for (let level = 0; level < treeHeight; level++) {
         nLeavesAtThisHeight = reader.readVarIntNum();
@@ -12778,7 +13612,7 @@ ${ifStackInfo}`;
         }
         path[level].sort((a, b) => a.offset - b.offset);
       }
-      return new _MerklePath(blockHeight, path, legalOffsetsOnly);
+      return new _MerklePath(blockHeight, path, legalOffsetsOnly, validateRoots);
     }
     /**
      * Creates a MerklePath instance from a binary array.
@@ -12787,9 +13621,9 @@ ${ifStackInfo}`;
      * @param {number[]} bump - The binary array representation of the Merkle Path.
      * @returns {MerklePath} - A new MerklePath instance.
      */
-    static fromBinary(bump) {
+    static fromBinary(bump, legalOffsetsOnly = true, validateRoots = true) {
       const reader = new ReaderUint8Array(bump);
-      return _MerklePath.fromReader(reader);
+      return _MerklePath.fromReader(reader, legalOffsetsOnly, validateRoots);
     }
     /**
      *
@@ -12805,10 +13639,10 @@ ${ifStackInfo}`;
     static fromCoinbaseTxidAndHeight(txid, height) {
       return new _MerklePath(height, [[{ offset: 0, hash: txid, txid: true }]]);
     }
-    constructor(blockHeight, path, legalOffsetsOnly = true) {
+    constructor(blockHeight, path, legalOffsetsOnly = true, validateRoots = true) {
       this.blockHeight = blockHeight;
       this.path = path;
-      const legalOffsets = new Array(this.path.length).fill(0).map(() => /* @__PURE__ */ new Set());
+      const legalOffsets = Array.from({ length: this.path.length }).fill(0).map(() => /* @__PURE__ */ new Set());
       this.path.forEach((leaves, height) => {
         if (leaves.length === 0 && height === 0) {
           throw new Error(`Empty level at height: ${height}`);
@@ -12826,15 +13660,22 @@ ${ifStackInfo}`;
               }
             }
           } else if (legalOffsetsOnly && !legalOffsets[height].has(leaf.offset)) {
-            throw new Error(`Invalid offset: ${leaf.offset}, at height: ${height}, with legal offsets: ${Array.from(legalOffsets[height]).join(", ")}`);
+            throw new Error(`Invalid offset: ${leaf.offset}, at height: ${height}, with legal offsets: ${Array.from(legalOffsets[height], (offset) => offset.toString()).join(", ")}`);
           }
         });
       });
+      if (!validateRoots)
+        return;
+      const sourceIndex = this.path.map((level) => new Map(level.map((leaf) => [leaf.offset, leaf])));
+      const hashCache = /* @__PURE__ */ new Map();
+      const nodeHashCache = /* @__PURE__ */ new Map();
+      const maxOffset = this.path[0].reduce((max, leaf) => Math.max(max, leaf.offset), 0);
       let root;
       this.path[0].forEach((leaf, idx) => {
+        const computed = this.computeRootCached(leaf.hash, sourceIndex, hashCache, nodeHashCache, maxOffset);
         if (idx === 0)
-          root = this.computeRoot(leaf.hash);
-        if (root !== this.computeRoot(leaf.hash)) {
+          root = computed;
+        if (root !== computed) {
           throw new Error("Mismatched roots");
         }
       });
@@ -12903,6 +13744,42 @@ ${ifStackInfo}`;
       }
       return leaf.offset;
     }
+    computeRootCached(txid, sourceIndex, hashCache, nodeHashCache, maxOffset) {
+      if (typeof txid !== "string")
+        txid = this.path[0].find((leaf) => Boolean(leaf.hash))?.hash;
+      if (typeof txid !== "string")
+        throw new TypeError("Transaction ID is undefined");
+      const index = this.indexOf(txid);
+      if (this.path.length === 1 && this.path[0].length === 1)
+        return txid;
+      const treeHeight = Math.max(this.path.length, 32 - Math.clz32(maxOffset));
+      let workingHash = txid;
+      for (let height = 0; height < treeHeight; height++) {
+        const nodeKey = `${height}:${index >> height}`;
+        const cachedRoot = cachedMerkleRoot(nodeKey, workingHash, treeHeight, nodeHashCache);
+        if (cachedRoot != null)
+          return cachedRoot;
+        nodeHashCache.set(nodeKey, workingHash);
+        const offset = index >> height ^ 1;
+        const leaf = this.cachedFindLeaf(height, offset, sourceIndex, hashCache, maxOffset);
+        workingHash = nextCachedHash(workingHash, leaf, offset, index, height, this.path.length === 1 && index >> height === maxOffset >> height);
+      }
+      nodeHashCache.set(`${treeHeight}:0`, workingHash);
+      return workingHash;
+    }
+    nextRootHash(workingHash, index, height, maxOffset) {
+      const offset = index >> height ^ 1;
+      const leaf = this.findOrComputeLeaf(height, offset);
+      if (leaf == null) {
+        const isLastOddNode = this.path.length === 1 && index >> height === maxOffset >> height;
+        if (isLastOddNode)
+          return hashPair(workingHash, workingHash);
+        throw new Error(`Missing hash for index ${index} at height ${height}`);
+      }
+      if (leaf.duplicate === true)
+        return hashPair(workingHash, workingHash);
+      return offset % 2 === 1 ? hashPair(leaf.hash, workingHash) : hashPair(workingHash, leaf.hash);
+    }
     /**
      * Computes the Merkle root from the provided transaction ID.
      *
@@ -12922,28 +13799,13 @@ ${ifStackInfo}`;
         throw new TypeError("Transaction ID is undefined");
       }
       const index = this.indexOf(txid);
-      const hash = (m) => toHex(hash256(toArray2(m, "hex").reverse()).reverse());
       let workingHash = txid;
       if (this.path.length === 1 && this.path[0].length === 1)
         return workingHash;
       const maxOffset = this.path[0].reduce((max, l) => Math.max(max, l.offset), 0);
       const treeHeight = Math.max(this.path.length, 32 - Math.clz32(maxOffset));
       for (let height = 0; height < treeHeight; height++) {
-        const offset = index >> height ^ 1;
-        const leaf = this.findOrComputeLeaf(height, offset);
-        if (typeof leaf !== "object") {
-          if (this.path.length === 1 && index >> height === maxOffset >> height) {
-            workingHash = hash((workingHash ?? "") + (workingHash ?? ""));
-            continue;
-          }
-          throw new Error(`Missing hash for index ${index} at height ${height}`);
-        } else if (leaf.duplicate === true) {
-          workingHash = hash((workingHash ?? "") + (workingHash ?? ""));
-        } else if (offset % 2 === 1) {
-          workingHash = hash((leaf.hash ?? "") + (workingHash ?? ""));
-        } else {
-          workingHash = hash((workingHash ?? "") + (leaf.hash ?? ""));
-        }
+        workingHash = this.nextRootHash(workingHash, index, height, maxOffset);
       }
       return workingHash;
     }
@@ -12965,7 +13827,7 @@ ${ifStackInfo}`;
       const h = height - 1;
       const l = offset << 1;
       const leaf0 = this.findOrComputeLeaf(h, l);
-      if (leaf0 == null || leaf0.hash == null || leaf0.hash === "")
+      if (leaf0?.hash == null || leaf0.hash === "")
         return void 0;
       const leaf1 = this.findOrComputeLeaf(h, l + 1);
       if (leaf1?.hash == null) {
@@ -13003,7 +13865,7 @@ ${ifStackInfo}`;
       const root = this.computeRoot(txid);
       if (this.indexOf(txid) === 0) {
         const height = await chainTracker.currentHeight();
-        if (this.blockHeight + 100 < height) {
+        if (this.blockHeight + 100 > height) {
           return false;
         }
       }
@@ -13049,7 +13911,7 @@ ${ifStackInfo}`;
      */
     trim() {
       const pushIfNew = (v, a) => {
-        if (a.length === 0 || a.slice(-1)[0] !== v) {
+        if (a.length === 0 || a.at(-1) !== v) {
           a.push(v);
         }
       };
@@ -13070,8 +13932,8 @@ ${ifStackInfo}`;
       };
       let computedOffsets = [];
       let dropOffsets = [];
-      for (let h = 0; h < this.path.length; h++) {
-        this.path[h].sort((a, b) => a.offset - b.offset);
+      for (const level of this.path) {
+        level.sort((a, b) => a.offset - b.offset);
       }
       for (let l = 0; l < this.path[0].length; l++) {
         const n = this.path[0][l];
@@ -13160,51 +14022,14 @@ ${ifStackInfo}`;
       const originalRoot = this.computeRoot();
       const maxOffset = this.path[0].reduce((max, l) => Math.max(max, l.offset), 0);
       const treeHeight = Math.max(this.path.length, 32 - Math.clz32(maxOffset));
-      const sourceIndex = new Array(this.path.length);
-      for (let h = 0; h < this.path.length; h++) {
-        const map = /* @__PURE__ */ new Map();
-        for (const leaf of this.path[h])
-          map.set(leaf.offset, leaf);
-        sourceIndex[h] = map;
-      }
+      const sourceIndex = this.createSourceLeafIndex();
       const hashCache = /* @__PURE__ */ new Map();
-      const txidToOffset = /* @__PURE__ */ new Map();
-      for (const leaf of this.path[0]) {
-        if (leaf.hash != null)
-          txidToOffset.set(leaf.hash, leaf.offset);
-      }
-      const neededPerLevel = new Array(treeHeight);
-      for (let h = 0; h < treeHeight; h++)
-        neededPerLevel[h] = /* @__PURE__ */ new Map();
+      const txidToOffset = this.createTxidToOffsetIndex();
+      const neededPerLevel = this.createNeededLeafLevels(treeHeight);
       for (const txid of txids) {
-        const txOffset = txidToOffset.get(txid);
-        if (txOffset === void 0) {
-          throw new Error(`Transaction ID ${txid} not found in the Merkle Path`);
-        }
-        neededPerLevel[0].set(txOffset, { offset: txOffset, txid: true, hash: txid });
-        const sib0Offset = txOffset ^ 1;
-        if (!neededPerLevel[0].has(sib0Offset)) {
-          const sib = this.cachedFindLeaf(0, sib0Offset, sourceIndex, hashCache, maxOffset);
-          if (sib != null)
-            neededPerLevel[0].set(sib0Offset, sib);
-        }
-        for (let h = 1; h < treeHeight; h++) {
-          const sibOffset = txOffset >> h ^ 1;
-          if (neededPerLevel[h].has(sibOffset))
-            continue;
-          const sib = this.cachedFindLeaf(h, sibOffset, sourceIndex, hashCache, maxOffset);
-          if (sib != null) {
-            neededPerLevel[h].set(sibOffset, sib);
-          } else if (txOffset >> h === maxOffset >> h) {
-            neededPerLevel[h].set(sibOffset, { offset: sibOffset, duplicate: true });
-          }
-        }
+        this.collectExtractedLeaves(txid, txidToOffset, neededPerLevel, sourceIndex, hashCache, maxOffset, treeHeight);
       }
-      const compoundPath = new Array(treeHeight);
-      for (let h = 0; h < treeHeight; h++) {
-        compoundPath[h] = Array.from(neededPerLevel[h].values()).sort((a, b) => a.offset - b.offset);
-      }
-      const compound = new _MerklePath(this.blockHeight, compoundPath);
+      const compound = new _MerklePath(this.blockHeight, this.buildExtractedPath(neededPerLevel));
       compound.trim();
       const extractedRoot = compound.computeRoot();
       if (extractedRoot !== originalRoot) {
@@ -13212,9 +14037,115 @@ ${ifStackInfo}`;
       }
       return compound;
     }
+    createSourceLeafIndex() {
+      const sourceIndex = Array.from({ length: this.path.length });
+      for (let h = 0; h < this.path.length; h++) {
+        const map = /* @__PURE__ */ new Map();
+        for (const leaf of this.path[h])
+          map.set(leaf.offset, leaf);
+        sourceIndex[h] = map;
+      }
+      return sourceIndex;
+    }
+    createTxidToOffsetIndex() {
+      const txidToOffset = /* @__PURE__ */ new Map();
+      for (const leaf of this.path[0]) {
+        if (leaf.hash != null)
+          txidToOffset.set(leaf.hash, leaf.offset);
+      }
+      return txidToOffset;
+    }
+    createNeededLeafLevels(treeHeight) {
+      const neededPerLevel = Array.from({ length: treeHeight });
+      for (let h = 0; h < treeHeight; h++)
+        neededPerLevel[h] = /* @__PURE__ */ new Map();
+      return neededPerLevel;
+    }
+    collectExtractedLeaves(txid, txidToOffset, neededPerLevel, sourceIndex, hashCache, maxOffset, treeHeight) {
+      const txOffset = txidToOffset.get(txid);
+      if (txOffset === void 0) {
+        throw new Error(`Transaction ID ${txid} not found in the Merkle Path`);
+      }
+      neededPerLevel[0].set(txOffset, { offset: txOffset, txid: true, hash: txid });
+      const levelZeroSiblingOffset = txOffset ^ 1;
+      if (!neededPerLevel[0].has(levelZeroSiblingOffset)) {
+        const sibling = this.cachedFindLeaf(0, levelZeroSiblingOffset, sourceIndex, hashCache, maxOffset);
+        if (sibling != null)
+          neededPerLevel[0].set(levelZeroSiblingOffset, sibling);
+      }
+      for (let h = 1; h < treeHeight; h++) {
+        const siblingOffset = txOffset >> h ^ 1;
+        if (neededPerLevel[h].has(siblingOffset))
+          continue;
+        const sibling = this.cachedFindLeaf(h, siblingOffset, sourceIndex, hashCache, maxOffset);
+        if (sibling != null) {
+          neededPerLevel[h].set(siblingOffset, sibling);
+        } else if (txOffset >> h === maxOffset >> h) {
+          neededPerLevel[h].set(siblingOffset, { offset: siblingOffset, duplicate: true });
+        }
+      }
+    }
+    buildExtractedPath(neededPerLevel) {
+      return neededPerLevel.map((level) => {
+        return Array.from(level.values()).sort((a, b) => a.offset - b.offset);
+      });
+    }
   };
 
+  // node_modules/@bsv/sdk/dist/esm/src/transaction/BeefConstants.js
+  var BEEF_V1 = 4022206465;
+  var BEEF_V2 = 4022206466;
+  var ATOMIC_BEEF = 16843009;
+  var TX_DATA_FORMAT;
+  (function(TX_DATA_FORMAT2) {
+    TX_DATA_FORMAT2[TX_DATA_FORMAT2["RAWTX"] = 0] = "RAWTX";
+    TX_DATA_FORMAT2[TX_DATA_FORMAT2["RAWTX_AND_BUMP_INDEX"] = 1] = "RAWTX_AND_BUMP_INDEX";
+    TX_DATA_FORMAT2[TX_DATA_FORMAT2["TXID_ONLY"] = 2] = "TXID_ONLY";
+  })(TX_DATA_FORMAT || (TX_DATA_FORMAT = {}));
+
   // node_modules/@bsv/sdk/dist/esm/src/transaction/BeefTx.js
+  function skipBytes(br, length) {
+    if (!Number.isSafeInteger(length) || length < 0 || br.pos + length > br.bin.length) {
+      throw new RangeError("Serialized transaction exceeds available BEEF data");
+    }
+    if (br instanceof ReaderUint8Array)
+      br.skip(length);
+    else
+      br.pos += length;
+  }
+  function scanRawTransaction(br) {
+    const start = br.pos;
+    skipBytes(br, 4);
+    const inputCount = br.readVarIntNum(false);
+    const inputTxids = /* @__PURE__ */ new Set();
+    for (let i = 0; i < inputCount; i++) {
+      inputTxids.add(toHex(br.readReverse(32)));
+      skipBytes(br, 4);
+      const scriptLength = br.readVarIntNum(false);
+      skipBytes(br, scriptLength + 4);
+    }
+    const outputCount = br.readVarIntNum(false);
+    for (let i = 0; i < outputCount; i++) {
+      skipBytes(br, 8);
+      const scriptLength = br.readVarIntNum(false);
+      skipBytes(br, scriptLength);
+    }
+    skipBytes(br, 4);
+    const rawTx = br instanceof ReaderUint8Array ? br.bin.subarray(start, br.pos) : Uint8Array.from(br.bin.slice(start, br.pos));
+    return { rawTx, inputTxids: Array.from(inputTxids) };
+  }
+  function scanInputTxids(rawTx) {
+    return scanRawTransaction(new ReaderUint8Array(rawTx)).inputTxids;
+  }
+  function sameTxids(a, b) {
+    if (a.length !== b.length)
+      return false;
+    for (let i = 0; i < a.length; i++) {
+      if (a[i] !== b[i])
+        return false;
+    }
+    return true;
+  }
   var BeefTx = class _BeefTx {
     _bumpIndex;
     _tx;
@@ -13248,7 +14179,7 @@ ${ifStackInfo}`;
         return this._txid;
       }
       if (this._rawTx != null) {
-        this._txid = toHex(hash256(this._rawTx));
+        this._txid = toHex(hash256(this._rawTx).reverse());
         return this._txid;
       }
       throw new Error("Internal");
@@ -13257,7 +14188,7 @@ ${ifStackInfo}`;
       if (this._tx != null)
         return this._tx;
       if (this._rawTx != null) {
-        this._tx = Transaction.fromBinary(this._rawTx);
+        this._tx = Transaction.fromBinaryView(this._rawTx);
         return this._tx;
       }
       return void 0;
@@ -13266,33 +14197,53 @@ ${ifStackInfo}`;
      * Raw transaction bytes, if available as number[]
      */
     get rawTx() {
-      if (this._rawTx != null) {
-        return Array.from(this._rawTx);
-      }
-      if (this._tx != null) {
-        const bytes2 = this._tx.toUint8Array();
-        this._rawTx = bytes2;
-        return Array.from(bytes2);
-      }
-      return void 0;
+      const bytes2 = this.rawTxUint8Array;
+      return bytes2 == null ? void 0 : Array.from(bytes2);
     }
     /**
      * Raw transaction bytes, if available as Uint8Array
      */
     get rawTxUint8Array() {
-      if (this._rawTx != null)
-        return this._rawTx;
       if (this._tx != null) {
-        this._rawTx = this._tx.toUint8Array();
+        if (this._rawTx == null)
+          this._rawTx = this._tx.toUint8Array();
+        else
+          this.syncRawTxFromTransaction();
         return this._rawTx;
       }
-      return void 0;
+      return this._rawTx;
+    }
+    /**
+     * Synchronizes a nested transaction after mutation through the normal
+     * Transaction APIs. Returns true when its serialized identity or dependencies
+     * changed.
+     *
+     * @internal
+     */
+    syncRawTxFromTransaction() {
+      if (this._tx == null)
+        return false;
+      const bytes2 = this._tx.toUint8Array();
+      if (this._rawTx != null) {
+        if (bytes2 === this._rawTx)
+          return false;
+        this._rawTx = bytes2;
+        this._txid = this._tx.id("hex");
+        this.updateInputTxids();
+        return true;
+      }
+      const txid = this._tx.id("hex");
+      const txidChanged = this._txid != null && this._txid !== txid;
+      const previousInputTxids = this.inputTxids;
+      this._txid = txid;
+      this.updateInputTxids();
+      return txidChanged || !sameTxids(previousInputTxids, this.inputTxids);
     }
     /**
      * @param tx If string, must be a valid txid. If `number[]` must be a valid serialized transaction.
      * @param bumpIndex If transaction already has a proof in the beef to which it will be added.
      */
-    constructor(tx, bumpIndex) {
+    constructor(tx, bumpIndex, inputTxids) {
       if (typeof tx === "string") {
         this._txid = tx;
       } else if (tx instanceof Uint8Array) {
@@ -13302,10 +14253,15 @@ ${ifStackInfo}`;
       } else if (tx instanceof Transaction) {
         this._tx = tx;
       } else {
-        throw new Error("Invalid transaction data type");
+        throw new TypeError("Invalid transaction data type");
       }
-      this.bumpIndex = bumpIndex;
-      this.updateInputTxids();
+      this._bumpIndex = bumpIndex;
+      if (this.hasProof)
+        this.inputTxids = [];
+      else if (inputTxids != null)
+        this.inputTxids = inputTxids;
+      else
+        this.updateInputTxids();
     }
     static fromTx(tx, bumpIndex) {
       return new _BeefTx(tx, bumpIndex);
@@ -13317,16 +14273,20 @@ ${ifStackInfo}`;
       return new _BeefTx(txid, bumpIndex);
     }
     updateInputTxids() {
-      if (this.hasProof || this.tx == null) {
+      if (this.hasProof) {
         this.inputTxids = [];
-      } else {
+      } else if (this._tx != null) {
         const inputTxids = /* @__PURE__ */ new Set();
-        for (const input of this.tx.inputs) {
+        for (const input of this._tx.inputs) {
           if (input.sourceTXID !== void 0 && input.sourceTXID !== null && input.sourceTXID !== "") {
             inputTxids.add(input.sourceTXID);
           }
         }
         this.inputTxids = Array.from(inputTxids);
+      } else if (this._rawTx != null) {
+        this.inputTxids = scanInputTxids(this._rawTx);
+      } else {
+        this.inputTxids = [];
       }
     }
     toWriter(writer, version) {
@@ -13372,7 +14332,6 @@ ${ifStackInfo}`;
       }
     }
     static fromReader(br, version) {
-      let data;
       let bumpIndex;
       let beefTx;
       if (version === BEEF_V2) {
@@ -13383,53 +14342,189 @@ ${ifStackInfo}`;
           if (format === TX_DATA_FORMAT.RAWTX_AND_BUMP_INDEX) {
             bumpIndex = br.readVarIntNum();
           }
-          data = Transaction.fromReader(br);
-          beefTx = _BeefTx.fromTx(data, bumpIndex);
+          const { rawTx, inputTxids } = scanRawTransaction(br);
+          beefTx = new _BeefTx(rawTx, bumpIndex, inputTxids);
         }
       } else {
-        data = Transaction.fromReader(br);
-        bumpIndex = br.readUInt8() !== 0 ? br.readVarIntNum() : void 0;
-        beefTx = _BeefTx.fromTx(data, bumpIndex);
+        const { rawTx, inputTxids } = scanRawTransaction(br);
+        bumpIndex = br.readUInt8() === 0 ? void 0 : br.readVarIntNum();
+        beefTx = new _BeefTx(rawTx, bumpIndex, inputTxids);
       }
       return beefTx;
     }
   };
 
   // node_modules/@bsv/sdk/dist/esm/src/transaction/Beef.js
-  var BEEF_V1 = 4022206465;
-  var BEEF_V2 = 4022206466;
-  var ATOMIC_BEEF = 16843009;
-  var TX_DATA_FORMAT;
-  (function(TX_DATA_FORMAT2) {
-    TX_DATA_FORMAT2[TX_DATA_FORMAT2["RAWTX"] = 0] = "RAWTX";
-    TX_DATA_FORMAT2[TX_DATA_FORMAT2["RAWTX_AND_BUMP_INDEX"] = 1] = "RAWTX_AND_BUMP_INDEX";
-    TX_DATA_FORMAT2[TX_DATA_FORMAT2["TXID_ONLY"] = 2] = "TXID_ONLY";
-  })(TX_DATA_FORMAT || (TX_DATA_FORMAT = {}));
+  function mergeCompatibleBumpLevels(levels, other, expectedLevels, validateCombined) {
+    if (other.path.length !== expectedLevels)
+      throw new Error("Mismatched roots");
+    for (let height = 0; height < expectedLevels; height++) {
+      mergeCompatibleBumpLevel(levels[height], other.path[height], validateCombined);
+    }
+  }
+  function mergeCompatibleBumpLevel(level, otherLeaves, validateCombined) {
+    for (const otherLeaf of otherLeaves) {
+      const existing = level.get(otherLeaf.offset);
+      if (existing == null) {
+        level.set(otherLeaf.offset, otherLeaf);
+        continue;
+      }
+      mergeCompatibleBumpLeaf(existing, otherLeaf, validateCombined);
+    }
+  }
+  function mergeCompatibleBumpLeaf(existing, other, validateCombined) {
+    if (validateCombined && (existing.hash !== other.hash || existing.duplicate !== other.duplicate)) {
+      throw new Error("Mismatched roots");
+    }
+    if (other.txid != null)
+      existing.txid = true;
+  }
+  function indexBumpTxids(bump, index, byTxid) {
+    for (const leaf of bump.path[0]) {
+      if (typeof leaf.hash === "string")
+        byTxid.set(leaf.hash, index);
+    }
+  }
   var Beef = class _Beef {
     bumps = [];
     txs = [];
     version = BEEF_V2;
     atomicTxid = void 0;
     txidIndex = void 0;
+    txPositionIndex = void 0;
+    bumpIndexesByHeight = void 0;
+    bumpIndexByTxid = void 0;
     rawBytesCache;
     hexCache;
+    atomicBytesCache = /* @__PURE__ */ new Map();
+    atomicCacheTxs;
+    atomicCacheBumps;
+    atomicCacheVersion;
+    rawCacheVersion;
+    rawCacheTxs;
+    rawCacheBumps;
+    bumpState;
     needsSort = true;
+    sortResultCache;
+    sortTxState;
     constructor(version = BEEF_V2) {
       this.version = version;
     }
     invalidateSerializationCaches() {
       this.rawBytesCache = void 0;
       this.hexCache = void 0;
+      this.atomicBytesCache.clear();
+      this.atomicCacheTxs = void 0;
+      this.atomicCacheBumps = void 0;
+      this.atomicCacheVersion = void 0;
+      this.rawCacheVersion = void 0;
+      this.rawCacheTxs = void 0;
+      this.rawCacheBumps = void 0;
+    }
+    captureSerializationState() {
+      this.rawCacheVersion = this.version;
+      this.rawCacheTxs = this.captureTransactionState();
+      this.rawCacheBumps = Array.from(this.bumps);
+      this.captureBumpState();
+    }
+    captureTransactionState() {
+      return this.txs.map((ref) => ({
+        ref,
+        bumpIndex: ref._bumpIndex,
+        rawTx: ref._rawTx,
+        // Once raw bytes exist, lazily parsing or hashing them does not change
+        // their serialized representation and must not evict the forwarding cache.
+        tx: ref._rawTx == null ? ref._tx : void 0,
+        txid: ref._rawTx == null && ref._tx == null ? ref._txid : void 0
+      }));
+    }
+    transactionStateMatches(cachedTxs) {
+      if (cachedTxs?.length !== this.txs.length)
+        return false;
+      for (let i = 0; i < this.txs.length; i++) {
+        const tx = this.txs[i];
+        const cached = cachedTxs[i];
+        if (cached.ref !== tx || cached.bumpIndex !== tx._bumpIndex || cached.rawTx !== tx._rawTx || cached.tx !== (tx._rawTx == null ? tx._tx : void 0) || cached.txid !== (tx._rawTx == null && tx._tx == null ? tx._txid : void 0))
+          return false;
+      }
+      return true;
+    }
+    captureBumpState() {
+      this.bumpState = this.bumps.map((ref) => ({
+        ref,
+        blockHeight: ref.blockHeight,
+        levels: ref.path.map((level) => ({
+          ref: level,
+          leaves: level.map((leaf) => ({
+            ref: leaf,
+            offset: leaf.offset,
+            hash: leaf.hash,
+            txid: leaf.txid,
+            duplicate: leaf.duplicate
+          }))
+        }))
+      }));
+    }
+    bumpLeafStateMatches(leaf, state) {
+      return state.ref === leaf && state.offset === leaf.offset && state.hash === leaf.hash && state.txid === leaf.txid && state.duplicate === leaf.duplicate;
+    }
+    bumpLevelStateMatches(level, state) {
+      return state.ref === level && state.leaves.length === level.length && level.every((leaf, index) => this.bumpLeafStateMatches(leaf, state.leaves[index]));
+    }
+    singleBumpStateMatches(bump, state) {
+      return state.ref === bump && state.blockHeight === bump.blockHeight && state.levels.length === bump.path.length && bump.path.every((level, index) => this.bumpLevelStateMatches(level, state.levels[index]));
+    }
+    bumpStateMatches() {
+      if (this.bumpState?.length !== this.bumps.length)
+        return false;
+      return this.bumps.every((bump, index) => this.singleBumpStateMatches(bump, this.bumpState[index]));
+    }
+    synchronizeNestedBumpMutations() {
+      if (this.bumpState == null) {
+        this.captureBumpState();
+        return;
+      }
+      if (!this.bumpStateMatches()) {
+        this.invalidateSerializationCaches();
+        this.sortResultCache = void 0;
+        this.sortTxState = void 0;
+        this.needsSort = true;
+        this.invalidateBumpIndexes();
+        this.captureBumpState();
+      }
+    }
+    serializationCacheMatchesState() {
+      if (this.rawBytesCache == null || this.rawCacheVersion !== this.version || !this.transactionStateMatches(this.rawCacheTxs) || this.rawCacheBumps?.length !== this.bumps.length)
+        return false;
+      for (let i = 0; i < this.bumps.length; i++) {
+        if (this.rawCacheBumps[i] !== this.bumps[i])
+          return false;
+      }
+      return true;
     }
     markMutated(requiresSort = true) {
       this.invalidateSerializationCaches();
+      this.sortResultCache = void 0;
+      this.sortTxState = void 0;
       if (requiresSort) {
         this.needsSort = true;
       }
     }
     ensureSerializableState() {
       for (const tx of this.txs) {
-        void tx.txid;
+        tx.txid;
+      }
+    }
+    synchronizeNestedTransactionMutations() {
+      let changed = false;
+      for (const tx of this.txs)
+        changed = tx.syncRawTxFromTransaction() || changed;
+      if (changed) {
+        this.invalidateSerializationCaches();
+        this.sortResultCache = void 0;
+        this.sortTxState = void 0;
+        this.needsSort = true;
+        this.rebuildTxIndexes();
       }
     }
     ensureSortedForSerialization() {
@@ -13438,54 +14533,172 @@ ${ifStackInfo}`;
       }
     }
     getSerializedBytes() {
+      this.synchronizeNestedTransactionMutations();
+      this.synchronizeNestedBumpMutations();
+      if (this.serializationCacheMatchesState() && this.rawBytesCache != null)
+        return this.rawBytesCache;
+      this.invalidateSerializationCaches();
       this.ensureSerializableState();
-      if (this.rawBytesCache == null) {
-        this.ensureSortedForSerialization();
-        const writer = new WriterUint8Array();
-        this.toWriter(writer);
-        this.rawBytesCache = writer.toUint8Array();
-      }
+      this.ensureSortedForSerialization();
+      const writer = new WriterUint8Array();
+      this.toWriter(writer);
+      this.rawBytesCache = writer.toUint8Array();
+      this.captureSerializationState();
       return this.rawBytesCache;
     }
     getBeefForAtomic(txid) {
-      if (this.needsSort) {
-        this.sortTxs();
-      }
-      const tx = this.findTxid(txid);
-      if (tx == null) {
+      this.synchronizeNestedTransactionMutations();
+      this.synchronizeNestedBumpMutations();
+      const txidToTx = this.ensureTxidIndex();
+      const subject = txidToTx.get(txid);
+      if (subject == null) {
         throw new Error(`${txid} does not exist in this Beef`);
       }
-      const beef = this.txs[this.txs.length - 1] === tx ? this : this.clone();
-      if (beef !== this) {
-        const i = this.txs.findIndex((t) => t.txid === txid);
-        beef.txs.splice(i + 1);
+      const included = this.collectAtomicTransactions(subject, txidToTx);
+      const beef = this.copySelectedTransactions(included);
+      beef.sortTxs();
+      return beef;
+    }
+    getAtomicSerializedBytes(txid) {
+      this.synchronizeNestedTransactionMutations();
+      this.synchronizeNestedBumpMutations();
+      const cacheMatches = this.atomicCacheVersion === this.version && this.transactionStateMatches(this.atomicCacheTxs) && this.atomicCacheBumps?.length === this.bumps.length && this.bumps.every((bump, index) => this.atomicCacheBumps?.[index] === bump);
+      if (!cacheMatches)
+        this.atomicBytesCache.clear();
+      const cached = this.atomicBytesCache.get(txid);
+      if (cached != null)
+        return cached;
+      const beefBytes = this.getBeefForAtomic(txid).getSerializedBytes();
+      const txidBytes = toUint8Array(txid, "hex");
+      const atomic = new Uint8Array(4 + txidBytes.length + beefBytes.length);
+      const view = new DataView(atomic.buffer);
+      view.setUint32(0, ATOMIC_BEEF, true);
+      for (let i = 0; i < txidBytes.length; i++) {
+        atomic[4 + i] = txidBytes[txidBytes.length - 1 - i];
       }
-      const writer = new WriterUint8Array();
-      writer.writeUInt32LE(ATOMIC_BEEF);
-      writer.writeReverse(toArray2(txid, "hex"));
-      return { beef, writer };
+      atomic.set(beefBytes, 4 + txidBytes.length);
+      this.atomicBytesCache.set(txid, atomic);
+      this.atomicCacheTxs = this.captureTransactionState();
+      this.atomicCacheBumps = Array.from(this.bumps);
+      this.atomicCacheVersion = this.version;
+      return atomic;
+    }
+    collectAtomicTransactions(subject, txidToTx) {
+      const included = /* @__PURE__ */ new Set();
+      const stack = [subject];
+      while (stack.length > 0) {
+        const tx = stack.pop();
+        if (tx == null || included.has(tx))
+          continue;
+        included.add(tx);
+        if (this.hasMatchingBump(tx) || tx.isTxidOnly)
+          continue;
+        for (const inputTxid of tx.inputTxids) {
+          const input = txidToTx.get(inputTxid);
+          if (input != null)
+            stack.push(input);
+        }
+      }
+      return included;
+    }
+    hasMatchingBump(tx) {
+      const bumpIndex = tx.bumpIndex;
+      if (bumpIndex == null || !Number.isSafeInteger(bumpIndex) || bumpIndex < 0 || bumpIndex >= this.bumps.length)
+        return false;
+      return this.bumps[bumpIndex]?.path[0]?.some((leaf) => leaf.hash === tx.txid) ?? false;
+    }
+    copySelectedTransactions(included) {
+      const beef = new _Beef(this.version);
+      const bumpIndexMap = /* @__PURE__ */ new Map();
+      for (const tx of this.txs) {
+        if (!included.has(tx) || !this.hasMatchingBump(tx) || tx.bumpIndex == null)
+          continue;
+        if (!bumpIndexMap.has(tx.bumpIndex)) {
+          bumpIndexMap.set(tx.bumpIndex, beef.bumps.length);
+          beef.bumps.push(this.bumps[tx.bumpIndex]);
+        }
+      }
+      for (const tx of this.txs) {
+        if (!included.has(tx))
+          continue;
+        const bumpIndex = tx.bumpIndex == null ? void 0 : bumpIndexMap.get(tx.bumpIndex);
+        let copy;
+        if (tx._rawTx != null) {
+          copy = new BeefTx(tx._rawTx, bumpIndex, Array.from(tx.inputTxids));
+        } else if (tx._tx != null) {
+          copy = BeefTx.fromTx(tx._tx, bumpIndex);
+        } else {
+          copy = BeefTx.fromTxid(tx.txid, bumpIndex);
+        }
+        beef.txs.push(copy);
+      }
+      return beef;
+    }
+    /**
+     * Checks the BRC-95 transaction-inclusion rule without requiring header-root
+     * validation: the subject must exist and every included transaction must be
+     * in its recursive dependency graph.
+     */
+    isAtomic(txid = this.atomicTxid ?? "") {
+      this.synchronizeNestedTransactionMutations();
+      this.synchronizeNestedBumpMutations();
+      if (txid.length === 0)
+        return false;
+      const txidToTx = this.ensureTxidIndex();
+      if (txidToTx.size !== this.txs.length)
+        return false;
+      const subject = txidToTx.get(txid);
+      if (subject == null)
+        return false;
+      return this.collectAtomicTransactions(subject, txidToTx).size === this.txs.length;
     }
     /**
      * @param txid of `beefTx` to find
      * @returns `BeefTx` in `txs` with `txid`.
      */
     findTxid(txid) {
+      this.synchronizeNestedTransactionMutations();
+      return this.findTxidIndexed(txid);
+    }
+    findTxidIndexed(txid) {
       return this.ensureTxidIndex().get(txid);
     }
     ensureTxidIndex() {
-      if (this.txidIndex == null) {
-        this.txidIndex = /* @__PURE__ */ new Map();
-        for (const tx of this.txs) {
-          this.txidIndex.set(tx.txid, tx);
-        }
-      }
+      if (this.txidIndex == null || this.txPositionIndex == null)
+        this.rebuildTxIndexes();
       return this.txidIndex;
+    }
+    ensureTxPositionIndex() {
+      if (this.txPositionIndex == null || this.txidIndex == null)
+        this.rebuildTxIndexes();
+      return this.txPositionIndex;
+    }
+    rebuildTxIndexes() {
+      this.txidIndex = /* @__PURE__ */ new Map();
+      this.txPositionIndex = /* @__PURE__ */ new Map();
+      for (let i = 0; i < this.txs.length; i++) {
+        const tx = this.txs[i];
+        this.txidIndex.set(tx.txid, tx);
+        this.txPositionIndex.set(tx.txid, i);
+      }
     }
     deleteFromIndex(txid) {
       this.txidIndex?.delete(txid);
+      this.txPositionIndex?.delete(txid);
     }
-    addToIndex(tx) {
+    addToIndex(tx, position = this.txs.length - 1) {
       this.txidIndex?.set(tx.txid, tx);
+      this.txPositionIndex?.set(tx.txid, position);
+    }
+    replaceOrAppendTx(tx) {
+      const position = this.ensureTxPositionIndex().get(tx.txid);
+      if (position === void 0) {
+        this.txs.push(tx);
+        this.addToIndex(tx);
+      } else {
+        this.txs[position] = tx;
+        this.addToIndex(tx, position);
+      }
     }
     /**
      * Replaces `BeefTx` for this txid with txidOnly.
@@ -13498,27 +14711,55 @@ ${ifStackInfo}`;
      * @returns undefined if txid is unknown.
      */
     makeTxidOnly(txid) {
-      const i = this.txs.findIndex((tx) => tx.txid === txid);
-      if (i === -1)
+      const i = this.ensureTxPositionIndex().get(txid);
+      if (i === void 0)
         return void 0;
       let btx = this.txs[i];
       if (btx.isTxidOnly) {
         return btx;
       }
-      this.deleteFromIndex(txid);
-      this.txs.splice(i, 1);
+      btx = BeefTx.fromTxid(txid);
+      this.txs[i] = btx;
+      this.addToIndex(btx, i);
+      this.tryToValidateBumpIndex(btx);
       this.markMutated(true);
-      btx = this.mergeTxidOnly(txid);
       return btx;
     }
     /**
      * @returns `MerklePath` with level zero hash equal to txid or undefined.
      */
     findBump(txid) {
-      return this.bumps.find(
-        (b) => b.path[0].some((leaf) => leaf.hash === txid)
-        // ✅ Ensure boolean return with `.some()`
-      );
+      this.synchronizeNestedBumpMutations();
+      const index = this.ensureBumpTxidIndex().get(txid);
+      return index === void 0 ? void 0 : this.bumps[index];
+    }
+    ensureBumpTxidIndex() {
+      if (this.bumpIndexByTxid == null) {
+        this.bumpIndexByTxid = /* @__PURE__ */ new Map();
+        for (let i = 0; i < this.bumps.length; i++) {
+          for (const leaf of this.bumps[i].path[0]) {
+            if (typeof leaf.hash === "string")
+              this.bumpIndexByTxid.set(leaf.hash, i);
+          }
+        }
+      }
+      return this.bumpIndexByTxid;
+    }
+    ensureBumpHeightIndex() {
+      if (this.bumpIndexesByHeight == null) {
+        this.bumpIndexesByHeight = /* @__PURE__ */ new Map();
+        for (let i = 0; i < this.bumps.length; i++) {
+          const bump = this.bumps[i];
+          const indexes = this.bumpIndexesByHeight.get(bump.blockHeight) ?? [];
+          indexes.push(i);
+          this.bumpIndexesByHeight.set(bump.blockHeight, indexes);
+        }
+      }
+      return this.bumpIndexesByHeight;
+    }
+    invalidateBumpIndexes() {
+      this.bumpIndexesByHeight = void 0;
+      this.bumpIndexByTxid = void 0;
     }
     /**
      * Finds a Transaction in this `Beef`
@@ -13531,11 +14772,11 @@ ${ifStackInfo}`;
      */
     findTransactionForSigning(txid) {
       const beefTx = this.findTxid(txid);
-      if (beefTx == null || beefTx.tx == null)
+      if (beefTx?.tx == null)
         return void 0;
       for (const i of beefTx.tx.inputs) {
         if (i.sourceTransaction == null) {
-          const itx = this.findTxid(verifyNotNull(i.sourceTXID, "sourceTXID must be valid"));
+          const itx = this.findTxidIndexed(verifyNotNull(i.sourceTXID, "sourceTXID must be valid"));
           if (itx != null) {
             i.sourceTransaction = itx.tx;
           }
@@ -13553,33 +14794,42 @@ ${ifStackInfo}`;
      */
     findAtomicTransaction(txid) {
       const beefTx = this.findTxid(txid);
-      if (beefTx == null || beefTx.tx == null)
+      if (beefTx?.tx == null)
         return void 0;
-      const addInputProof = (beef, tx) => {
-        const mp = beef.findBump(tx.id("hex"));
-        if (mp != null) {
-          tx.merklePath = mp;
-        } else {
-          for (const i of tx.inputs) {
-            if (i.sourceTransaction == null) {
-              const itx = beef.findTxid(verifyNotNull(i.sourceTXID, "sourceTXID must be valid"));
-              if (itx != null) {
-                i.sourceTransaction = itx.tx;
-              }
-            }
-            if (i.sourceTransaction != null) {
-              const mp2 = beef.findBump(i.sourceTransaction.id("hex"));
-              if (mp2 != null) {
-                i.sourceTransaction.merklePath = mp2;
-              } else {
-                addInputProof(beef, i.sourceTransaction);
-              }
-            }
-          }
-        }
-      };
-      addInputProof(this, beefTx.tx);
+      this.addInputProof(beefTx.tx);
       return beefTx.tx;
+    }
+    /** Iteratively attach merkle paths and source transactions to all inputs. */
+    addInputProof(tx) {
+      const visited = /* @__PURE__ */ new Set();
+      const stack = [tx];
+      while (stack.length > 0) {
+        const current = stack.pop();
+        if (current == null)
+          continue;
+        const txid = current.id("hex");
+        if (visited.has(txid))
+          continue;
+        visited.add(txid);
+        const mp = this.findBump(txid);
+        if (mp != null) {
+          current.merklePath = mp;
+          continue;
+        }
+        for (const input of current.inputs) {
+          this.resolveInputSource(input);
+          if (input.sourceTransaction != null)
+            stack.push(input.sourceTransaction);
+        }
+      }
+    }
+    resolveInputSource(i) {
+      if (i.sourceTransaction == null) {
+        const itx = this.findTxidIndexed(verifyNotNull(i.sourceTXID, "sourceTXID must be valid"));
+        if (itx != null) {
+          i.sourceTransaction = itx.tx;
+        }
+      }
     }
     /**
      * Merge a MerklePath that is assumed to be fully valid.
@@ -13587,41 +14837,119 @@ ${ifStackInfo}`;
      * @returns index of merged bump
      */
     mergeBump(bump) {
+      this.synchronizeNestedTransactionMutations();
+      this.synchronizeNestedBumpMutations();
       this.markMutated(false);
-      let bumpIndex;
-      for (let i = 0; i < this.bumps.length; i++) {
-        const b2 = this.bumps[i];
-        if (b2 === bump) {
-          return i;
-        }
-        if (b2.blockHeight === bump.blockHeight) {
-          const rootA = b2.computeRoot();
-          const rootB = bump.computeRoot();
-          if (rootA === rootB) {
-            b2.combine(bump);
-            bumpIndex = i;
-            break;
-          }
+      return this.mergeBumpEntry(bump);
+    }
+    /**
+     * Merge several independently proven transactions in one mutation pass.
+     *
+     * This is equivalent to calling `mergeRawTx` followed by `mergeBump` for
+     * every entry, but synchronizes nested BEEF state only once. That distinction
+     * matters for wallets assembling a BEEF from a fragmented UTXO set because
+     * proof paths are otherwise re-scanned after every input.
+     */
+    mergeProvenTxs(entries) {
+      if (entries.length === 0)
+        return [];
+      this.synchronizeNestedTransactionMutations();
+      this.synchronizeNestedBumpMutations();
+      this.markMutated(true);
+      const merged = [];
+      for (const entry of entries) {
+        merged.push(this.mergeRawTxEntry(entry.rawTx));
+      }
+      const heightCounts = /* @__PURE__ */ new Map();
+      for (const entry of entries) {
+        const height = entry.merklePath.blockHeight;
+        heightCounts.set(height, (heightCounts.get(height) ?? 0) + 1);
+      }
+      const groups = /* @__PURE__ */ new Map();
+      for (let index = 0; index < entries.length; index++) {
+        const path = entries[index].merklePath;
+        const rootHint = entries[index].merkleRoot;
+        const key = heightCounts.get(path.blockHeight) === 1 ? `${path.blockHeight}:single:${index}` : `${path.blockHeight}:${rootHint ?? path.computeRoot()}`;
+        const group = groups.get(key);
+        if (group == null) {
+          groups.set(key, { first: index, paths: [path], validateCombined: rootHint != null });
+        } else {
+          group.paths.push(path);
+          group.validateCombined = group.validateCombined || rootHint != null;
         }
       }
-      if (bumpIndex === void 0) {
-        bumpIndex = this.bumps.length;
-        this.bumps.push(bump);
+      for (const group of [...groups.values()].sort((a, b) => a.first - b.first)) {
+        this.mergeBumpEntry(this.combineCompatibleBumps(group.paths, group.validateCombined));
       }
+      return merged;
+    }
+    /** Combine already root-matched paths while preserving the first path reference. */
+    combineCompatibleBumps(paths, validateCombined = false) {
+      const combined = paths[0];
+      if (paths.length === 1 && !validateCombined)
+        return combined;
+      const levels = combined.path.map((level) => new Map(level.map((leaf) => [leaf.offset, leaf])));
+      for (let pathIndex = 1; pathIndex < paths.length; pathIndex++) {
+        mergeCompatibleBumpLevels(levels, paths[pathIndex], combined.path.length, validateCombined);
+      }
+      const combinedPath = levels.map((level) => [...level.values()]);
+      if (validateCombined) {
+        const validated = new MerklePath(combined.blockHeight, combinedPath);
+        validated.trim();
+        return validated;
+      }
+      combined.path = combinedPath;
+      combined.trim();
+      return combined;
+    }
+    /** Merge one bump after the caller has synchronized and marked the BEEF. */
+    mergeBumpEntry(bump) {
+      const bumpIndex = this.findOrInsertBump(bump);
       const b = this.bumps[bumpIndex];
-      for (const tx of this.txs) {
-        const txid = tx.txid;
-        if (tx.bumpIndex == null) {
-          for (const n of b.path[0]) {
-            if (n.hash === txid) {
-              tx.bumpIndex = bumpIndex;
-              n.txid = true;
-              break;
-            }
-          }
-        }
+      const txIndex = this.ensureTxidIndex();
+      for (const leaf of b.path[0]) {
+        if (typeof leaf.hash !== "string")
+          continue;
+        const tx = txIndex.get(leaf.hash);
+        if (tx != null && tx.bumpIndex == null)
+          this.tryMarkTxProvenByBump(tx, b, bumpIndex);
       }
       return bumpIndex;
+    }
+    /**
+     * Find an existing compatible bump or insert a new one; return its index.
+     */
+    findOrInsertBump(bump) {
+      const byHeight = this.ensureBumpHeightIndex();
+      const byTxid = this.ensureBumpTxidIndex();
+      const sameHeight = byHeight.get(bump.blockHeight) ?? [];
+      if (sameHeight.length > 0) {
+        const root = bump.computeRoot();
+        for (const existing of sameHeight) {
+          if (this.bumps[existing].computeRoot() !== root)
+            continue;
+          this.bumps[existing].combine(bump);
+          indexBumpTxids(this.bumps[existing], existing, byTxid);
+          return existing;
+        }
+      }
+      this.bumps.push(bump);
+      const index = this.bumps.length - 1;
+      sameHeight.push(index);
+      byHeight.set(bump.blockHeight, sameHeight);
+      indexBumpTxids(bump, index, byTxid);
+      return index;
+    }
+    /** If bump's level-0 path contains tx's txid, record the bumpIndex on tx. */
+    tryMarkTxProvenByBump(tx, b, bumpIndex) {
+      const txid = tx.txid;
+      for (const n of b.path[0]) {
+        if (n.hash === txid) {
+          tx.bumpIndex = bumpIndex;
+          n.txid = true;
+          break;
+        }
+      }
     }
     /**
      * Merge a serialized transaction.
@@ -13635,13 +14963,30 @@ ${ifStackInfo}`;
      * @returns txid of rawTx
      */
     mergeRawTx(rawTx, bumpIndex) {
+      this.synchronizeNestedTransactionMutations();
       this.markMutated(true);
+      return this.mergeRawTxEntry(rawTx, bumpIndex);
+    }
+    /** Merge one raw transaction after the caller has synchronized and marked the BEEF. */
+    mergeRawTxEntry(rawTx, bumpIndex) {
       const newTx = new BeefTx(rawTx, bumpIndex);
-      this.removeExistingTxid(newTx.txid);
-      this.txs.push(newTx);
-      this.addToIndex(newTx);
+      this.replaceOrAppendTx(newTx);
       this.tryToValidateBumpIndex(newTx);
       return newTx;
+    }
+    mergeTransactionEntry(current) {
+      const bumpIndex = current.merklePath == null ? void 0 : this.mergeBumpEntry(current.merklePath);
+      const newTx = new BeefTx(current, bumpIndex);
+      this.replaceOrAppendTx(newTx);
+      this.tryToValidateBumpIndex(newTx);
+      return newTx;
+    }
+    queueSourceTransactions(current, stack) {
+      for (let i = current.inputs.length - 1; i >= 0; i--) {
+        const source = current.inputs[i].sourceTransaction;
+        if (source != null)
+          stack.push(source);
+      }
     }
     /**
      * Merge a `Transaction` and any referenced `merklePath` and `sourceTransaction`, recursifely.
@@ -13654,36 +14999,44 @@ ${ifStackInfo}`;
      * @returns txid of tx
      */
     mergeTransaction(tx) {
+      this.synchronizeNestedTransactionMutations();
       this.markMutated(true);
-      const txid = tx.id("hex");
-      this.removeExistingTxid(txid);
-      let bumpIndex;
-      if (tx.merklePath != null) {
-        bumpIndex = this.mergeBump(tx.merklePath);
+      return this.mergeTransactionGraph(tx);
+    }
+    /** Merge one transaction graph after the caller has synchronized and marked the BEEF. */
+    mergeTransactionGraph(tx) {
+      tx.materializeSourceTXIDs();
+      const rootTxid = tx.id("hex");
+      const visited = /* @__PURE__ */ new Set();
+      const stack = [tx];
+      let root;
+      while (stack.length > 0) {
+        const current = stack.pop();
+        if (current == null)
+          continue;
+        const txid = current.id("hex");
+        if (visited.has(txid))
+          continue;
+        visited.add(txid);
+        const newTx = this.mergeTransactionEntry(current);
+        if (txid === rootTxid)
+          root = newTx;
+        if (newTx.bumpIndex === void 0)
+          this.queueSourceTransactions(current, stack);
       }
-      const newTx = new BeefTx(tx, bumpIndex);
-      this.txs.push(newTx);
-      this.addToIndex(newTx);
-      this.tryToValidateBumpIndex(newTx);
-      bumpIndex = newTx.bumpIndex;
-      if (bumpIndex === void 0) {
-        for (const input of tx.inputs) {
-          if (input.sourceTransaction != null) {
-            this.mergeTransaction(input.sourceTransaction);
-          }
-        }
-      }
-      return newTx;
+      if (root == null)
+        throw new Error("Failed to merge root transaction");
+      return root;
     }
     /**
      * Removes an existing transaction from the BEEF, given its TXID
      * @param txid TXID of the transaction to remove
      */
     removeExistingTxid(txid) {
-      const existingTxIndex = this.txs.findIndex((t) => t.txid === txid);
-      if (existingTxIndex >= 0) {
-        this.deleteFromIndex(txid);
+      const existingTxIndex = this.ensureTxPositionIndex().get(txid);
+      if (existingTxIndex !== void 0) {
         this.txs.splice(existingTxIndex, 1);
+        this.rebuildTxIndexes();
         this.markMutated(true);
       }
     }
@@ -13712,13 +15065,34 @@ ${ifStackInfo}`;
       }
       return beefTx;
     }
+    /** Merge one BEEF transaction after the caller has synchronized and marked the BEEF. */
+    mergeBeefTxEntry(btx) {
+      let beefTx = this.findTxidIndexed(btx.txid);
+      if (btx.isTxidOnly && beefTx == null) {
+        beefTx = BeefTx.fromTxid(btx.txid);
+        this.txs.push(beefTx);
+        this.addToIndex(beefTx);
+        this.tryToValidateBumpIndex(beefTx);
+      } else if (btx._tx != null && (beefTx == null || beefTx.isTxidOnly)) {
+        beefTx = this.mergeTransactionGraph(btx._tx);
+      } else if (btx._rawTx != null && (beefTx == null || beefTx.isTxidOnly)) {
+        beefTx = this.mergeRawTxEntry(btx._rawTx);
+      }
+      if (beefTx == null) {
+        throw new Error(`Failed to merge BeefTx for txid: ${btx.txid}`);
+      }
+      return beefTx;
+    }
     mergeBeef(beef) {
       const b = beef instanceof _Beef ? beef : _Beef.fromBinary(beef);
+      this.synchronizeNestedTransactionMutations();
+      this.synchronizeNestedBumpMutations();
+      this.markMutated(true);
       for (const bump of b.bumps) {
-        this.mergeBump(bump);
+        this.mergeBumpEntry(bump);
       }
       for (const tx of b.txs) {
-        this.mergeBeefTx(tx);
+        this.mergeBeefTxEntry(tx);
       }
     }
     /**
@@ -13781,59 +15155,98 @@ ${ifStackInfo}`;
      * `roots` is a record where keys are block heights and values are the corresponding merkle roots to be validated.
      */
     verifyValid(allowTxidOnly) {
+      this.synchronizeNestedBumpMutations();
       const r2 = {
         valid: false,
         roots: {}
       };
+      if (this.atomicTxid != null && !this.isAtomic(this.atomicTxid))
+        return r2;
       const sr = this.sortTxs();
+      if (this.hasDuplicateTxids())
+        return r2;
       if (sr.missingInputs.length > 0 || sr.notValid.length > 0 || sr.txidOnly.length > 0 && allowTxidOnly !== true || sr.withMissingInputs.length > 0) {
         return r2;
       }
       const txids = {};
+      if (!this.collectTxidOnlyTxids(txids, allowTxidOnly))
+        return r2;
+      if (!this.collectBumpTxids(txids, r2))
+        return r2;
+      if (!this.verifyBumpIndexLeaves())
+        return r2;
+      if (!this.verifyInputDependencies(txids))
+        return r2;
+      r2.valid = true;
+      return r2;
+    }
+    hasDuplicateTxids() {
+      const seen = /* @__PURE__ */ new Set();
       for (const tx of this.txs) {
-        if (tx.isTxidOnly) {
-          if (allowTxidOnly !== true)
-            return r2;
-          txids[tx.txid] = true;
-        }
+        if (seen.has(tx.txid))
+          return true;
+        seen.add(tx.txid);
       }
-      const confirmComputedRoot = (b, txid) => {
-        const root = b.computeRoot(txid);
-        if (r2.roots[b.blockHeight] === void 0 || r2.roots[b.blockHeight] === "") {
-          r2.roots[b.blockHeight] = root;
-        }
-        if (r2.roots[b.blockHeight] !== root) {
+      return false;
+    }
+    /** Add txidOnly transaction txids; return false if not allowed. */
+    collectTxidOnlyTxids(txids, allowTxidOnly) {
+      for (const tx of this.txs) {
+        if (!tx.isTxidOnly)
+          continue;
+        if (allowTxidOnly !== true)
           return false;
-        }
-        return true;
-      };
+        txids[tx.txid] = true;
+      }
+      return true;
+    }
+    /**
+     * Record txids proven by bumps; validate all bump roots agree per block height.
+     * Returns false if any root conflict is detected.
+     */
+    collectBumpTxids(txids, r2) {
       for (const b of this.bumps) {
         for (const n of b.path[0]) {
-          if (n.txid === true && typeof n.hash === "string" && n.hash.length > 0) {
-            txids[n.hash] = true;
-            if (!confirmComputedRoot(b, n.hash)) {
-              return r2;
-            }
-          }
+          if (n.txid !== true || typeof n.hash !== "string" || n.hash.length === 0)
+            continue;
+          txids[n.hash] = true;
+          if (!this.confirmComputedRoot(b, n.hash, r2))
+            return false;
         }
       }
+      return true;
+    }
+    /** Verify that every tx with a bumpIndex has a matching txid leaf in its bump. */
+    verifyBumpIndexLeaves() {
       for (const t of this.txs) {
-        if (t.bumpIndex !== void 0) {
-          const leaf = this.bumps[t.bumpIndex].path[0].find((l) => l.hash === t.txid);
-          if (leaf == null) {
-            return r2;
-          }
-        }
+        if (t.bumpIndex === void 0)
+          continue;
+        if (!Number.isSafeInteger(t.bumpIndex) || t.bumpIndex < 0 || t.bumpIndex >= this.bumps.length)
+          return false;
+        const leaf = this.bumps[t.bumpIndex]?.path[0]?.find((l) => l.hash === t.txid);
+        if (leaf == null)
+          return false;
       }
+      return true;
+    }
+    /** Verify all input txids appear before the spending tx in sorted order. */
+    verifyInputDependencies(txids) {
       for (const t of this.txs) {
         for (const i of t.inputTxids) {
           if (!txids[i])
-            return r2;
+            return false;
         }
         txids[t.txid] = true;
       }
-      r2.valid = true;
-      return r2;
+      return true;
+    }
+    /** Confirm the computed merkle root for txid in bump matches previously accepted root for that height. */
+    confirmComputedRoot(b, txid, r2) {
+      const root = b.computeRoot(txid);
+      if (r2.roots[b.blockHeight] === void 0 || r2.roots[b.blockHeight] === "") {
+        r2.roots[b.blockHeight] = root;
+      }
+      return r2.roots[b.blockHeight] === root;
     }
     /**
      * Serializes this data to `writer`
@@ -13843,7 +15256,7 @@ ${ifStackInfo}`;
       writer.writeUInt32LE(this.version);
       writer.writeVarIntNum(this.bumps.length);
       for (const b of this.bumps) {
-        writer.write(b.toBinary());
+        writer.write(writer instanceof WriterUint8Array ? b.toBinaryUint8Array() : b.toBinary());
       }
       writer.writeVarIntNum(this.txs.length);
       for (const tx of this.txs) {
@@ -13870,53 +15283,47 @@ ${ifStackInfo}`;
      *
      * `txid` must exist
      *
-     * after sorting, if txid is not last txid, creates a clone and removes newer txs
+     * includes exactly the subject transaction and its recursive dependencies
      *
      * @param txid
      * @returns serialized contents of this Beef with AtomicBEEF prefix.
      */
     toBinaryAtomic(txid) {
-      const { beef, writer } = this.getBeefForAtomic(txid);
-      beef.toWriter(writer);
-      return writer.toArray();
+      return Array.from(this.getAtomicSerializedBytes(txid));
     }
     /**
      * Serialize this Beef as AtomicBEEF.
      *
      * `txid` must exist
      *
-     * after sorting, if txid is not last txid, creates a clone and removes newer txs
+     * includes exactly the subject transaction and its recursive dependencies
      *
      * @param txid
      * @returns serialized contents of this Beef with AtomicBEEF prefix.
      */
     toUint8ArrayAtomic(txid) {
-      const { beef, writer } = this.getBeefForAtomic(txid);
-      const beefUint8 = beef.getSerializedBytes();
-      const prefix = writer.toUint8Array();
-      const atomic = new Uint8Array(prefix.length + beefUint8.length);
-      atomic.set(prefix, 0);
-      atomic.set(beefUint8, prefix.length);
-      return atomic;
+      return this.getAtomicSerializedBytes(txid);
     }
     /**
      * Returns a hex string representing the serialized BEEF
      * @returns A hex string representing the BEEF
      */
     toHex() {
-      if (this.hexCache != null) {
-        return this.hexCache;
-      }
       const bytes2 = this.getSerializedBytes();
+      if (this.hexCache != null)
+        return this.hexCache;
       const hex = toHex(bytes2);
       this.hexCache = hex;
       return hex;
     }
     static fromReader(br) {
+      const serializedStart = br.pos;
       let version = br.readUInt32LE();
       let atomicTxid;
+      let beefStart = serializedStart;
       if (version === ATOMIC_BEEF) {
         atomicTxid = toHex(br.readReverse(32));
+        beefStart = br.pos;
         version = br.readUInt32LE();
       }
       if (version !== BEEF_V1 && version !== BEEF_V2) {
@@ -13934,6 +15341,10 @@ ${ifStackInfo}`;
         beef.txs.push(beefTx);
       }
       beef.atomicTxid = atomicTxid;
+      if (br instanceof ReaderUint8Array) {
+        beef.rawBytesCache = br.bin.subarray(beefStart, br.pos);
+        beef.captureSerializationState();
+      }
       return beef;
     }
     /**
@@ -13942,8 +15353,18 @@ ${ifStackInfo}`;
      * @returns An instance of the Beef class constructed from the binary data
      */
     static fromBinary(bin) {
-      const br = ReaderUint8Array.makeReader(bin);
-      return _Beef.fromReader(br);
+      return _Beef.fromReader(new ReaderUint8Array(Uint8Array.from(bin)));
+    }
+    /**
+     * Parses BEEF while retaining zero-copy views over `bin`. The caller must not
+     * mutate the buffer for the lifetime of the returned object.
+     */
+    static fromBinaryView(bin) {
+      const br = new ReaderUint8Array(bin);
+      const beef = _Beef.fromReader(br);
+      if (!br.eof())
+        throw new Error("Serialized BEEF contains trailing data");
+      return beef;
     }
     /**
      * Constructs an instance of the Beef class based on the provided string
@@ -13968,15 +15389,14 @@ ${ifStackInfo}`;
         return true;
       }
       const txid = newTx.txid;
-      for (let i = 0; i < this.bumps.length; i++) {
-        const j = this.bumps[i].path[0].findIndex((b) => b.hash === txid);
-        if (j >= 0) {
-          newTx.bumpIndex = i;
-          this.bumps[i].path[0][j].txid = true;
-          return true;
-        }
-      }
-      return false;
+      const i = this.ensureBumpTxidIndex().get(txid);
+      if (i === void 0)
+        return false;
+      newTx.bumpIndex = i;
+      const leaf = this.bumps[i].path[0].find((b) => b.hash === txid);
+      if (leaf != null)
+        leaf.txid = true;
+      return true;
     }
     /**
      * Sort the `txs` by input txid dependency order:
@@ -13989,11 +15409,75 @@ ${ifStackInfo}`;
      * @returns `{ missingInputs, notValid, valid, withMissingInputs }`
      */
     sortTxs() {
+      this.synchronizeNestedTransactionMutations();
+      this.synchronizeNestedBumpMutations();
+      if (this.sortResultCache != null && this.sortTxStateMatches()) {
+        return this.cloneSortResult(this.sortResultCache);
+      }
+      this.sortResultCache = void 0;
+      this.sortTxState = void 0;
       const validTxids = {};
       const txidToTx = {};
-      let queue = [];
       const result = [];
       const txidOnly = [];
+      let queue = this.partitionTxs(txidToTx, validTxids, result, txidOnly);
+      const { txsMissingInputs, missingInputs, remaining } = this.separateMissingInputs(queue, txidToTx);
+      queue = remaining;
+      const txsNotValid = this.topoSort(queue, validTxids, result);
+      this.txs = txsMissingInputs.concat(txsNotValid).concat(txidOnly).concat(result);
+      this.needsSort = false;
+      this.invalidateSerializationCaches();
+      this.rebuildTxIndexes();
+      const sortResult = {
+        missingInputs: Object.keys(missingInputs),
+        notValid: txsNotValid.map((tx) => tx.txid),
+        valid: Object.keys(validTxids),
+        withMissingInputs: txsMissingInputs.map((tx) => tx.txid),
+        txidOnly: txidOnly.map((tx) => tx.txid)
+      };
+      this.sortResultCache = sortResult;
+      this.captureSortTxState();
+      return this.cloneSortResult(sortResult);
+    }
+    captureSortTxState() {
+      this.sortTxState = this.txs.map((tx) => ({
+        ref: tx,
+        txid: tx.txid,
+        bumpIndex: tx.bumpIndex,
+        isTxidOnly: tx.isTxidOnly,
+        inputTxids: [...tx.inputTxids]
+      }));
+    }
+    sortTxStateMatches() {
+      if (this.sortTxState?.length !== this.txs.length)
+        return false;
+      for (let index = 0; index < this.txs.length; index++) {
+        const tx = this.txs[index];
+        const state = this.sortTxState[index];
+        if (state.ref !== tx || state.txid !== tx.txid || state.bumpIndex !== tx.bumpIndex || state.isTxidOnly !== tx.isTxidOnly || state.inputTxids.length !== tx.inputTxids.length)
+          return false;
+        for (let inputIndex = 0; inputIndex < tx.inputTxids.length; inputIndex++) {
+          if (state.inputTxids[inputIndex] !== tx.inputTxids[inputIndex])
+            return false;
+        }
+      }
+      return true;
+    }
+    cloneSortResult(result) {
+      return {
+        missingInputs: [...result.missingInputs],
+        notValid: [...result.notValid],
+        valid: [...result.valid],
+        withMissingInputs: [...result.withMissingInputs],
+        txidOnly: [...result.txidOnly]
+      };
+    }
+    /**
+     * Partition txs into proven (result), txidOnly, and a queue of the rest.
+     * Populates txidToTx and validTxids as side-effects.
+     */
+    partitionTxs(txidToTx, validTxids, result, txidOnly) {
+      const queue = [];
       for (const tx of this.txs) {
         txidToTx[tx.txid] = tx;
         tx.isValid = tx.hasProof;
@@ -14007,11 +15491,16 @@ ${ifStackInfo}`;
           queue.push(tx);
         }
       }
+      return queue;
+    }
+    /**
+     * Separate queue entries that have at least one input txid not present in txidToTx.
+     */
+    separateMissingInputs(candidates, txidToTx) {
       const missingInputs = {};
       const txsMissingInputs = [];
-      const possiblyMissingInputs = queue;
-      queue = [];
-      for (const tx of possiblyMissingInputs) {
+      const remaining = [];
+      for (const tx of candidates) {
         let hasMissingInput = false;
         for (const inputTxid of tx.inputTxids) {
           if (txidToTx[inputTxid] === void 0) {
@@ -14022,35 +15511,77 @@ ${ifStackInfo}`;
         if (hasMissingInput) {
           txsMissingInputs.push(tx);
         } else {
-          queue.push(tx);
+          remaining.push(tx);
         }
       }
-      while (queue.length > 0) {
-        const oldQueue = queue;
-        queue = [];
-        for (const tx of oldQueue) {
-          if (tx.inputTxids.every((txid) => validTxids[txid])) {
-            validTxids[tx.txid] = true;
-            result.push(tx);
-          } else {
-            queue.push(tx);
+      return { txsMissingInputs, missingInputs, remaining };
+    }
+    /**
+     * Topologically sort queue into result; return anything that cannot be sorted.
+     */
+    topoSort(queue, validTxids, result) {
+      const { indegree, dependents, originalIndex, round } = this.buildTopoSortGraph(queue, validTxids);
+      const processed = this.processTopoSortQueue(queue, indegree, dependents, originalIndex, round);
+      this.appendTopoSortResult(queue, processed, round, validTxids, result);
+      return queue.filter((tx) => !processed.has(tx.txid));
+    }
+    buildTopoSortGraph(queue, validTxids) {
+      const candidates = new Set(queue.map((tx) => tx.txid));
+      const indegree = /* @__PURE__ */ new Map();
+      const dependents = /* @__PURE__ */ new Map();
+      const originalIndex = new Map(queue.map((tx, index) => [tx.txid, index]));
+      const round = /* @__PURE__ */ new Map();
+      for (const tx of queue) {
+        let degree = 0;
+        for (const inputTxid of tx.inputTxids) {
+          if (validTxids[inputTxid])
+            continue;
+          degree++;
+          if (candidates.has(inputTxid)) {
+            const children = dependents.get(inputTxid) ?? [];
+            children.push(tx);
+            dependents.set(inputTxid, children);
           }
         }
-        if (oldQueue.length === queue.length) {
-          break;
+        indegree.set(tx.txid, degree);
+        round.set(tx.txid, 0);
+      }
+      return { indegree, dependents, originalIndex, round };
+    }
+    processTopoSortQueue(queue, indegree, dependents, originalIndex, round) {
+      const ready = queue.filter((tx) => indegree.get(tx.txid) === 0);
+      const processed = /* @__PURE__ */ new Set();
+      for (const tx of ready) {
+        if (processed.has(tx.txid))
+          continue;
+        processed.add(tx.txid);
+        for (const dependent of dependents.get(tx.txid) ?? []) {
+          const nextRound = (round.get(tx.txid) ?? 0) + ((originalIndex.get(tx.txid) ?? 0) > (originalIndex.get(dependent.txid) ?? 0) ? 1 : 0);
+          round.set(dependent.txid, Math.max(round.get(dependent.txid) ?? 0, nextRound));
+          const next = (indegree.get(dependent.txid) ?? 0) - 1;
+          indegree.set(dependent.txid, next);
+          if (next === 0)
+            ready.push(dependent);
         }
       }
-      const txsNotValid = queue;
-      this.txs = txsMissingInputs.concat(txsNotValid).concat(txidOnly).concat(result);
-      this.needsSort = false;
-      this.invalidateSerializationCaches();
-      return {
-        missingInputs: Object.keys(missingInputs),
-        notValid: txsNotValid.map((tx) => tx.txid),
-        valid: Object.keys(validTxids),
-        withMissingInputs: txsMissingInputs.map((tx) => tx.txid),
-        txidOnly: txidOnly.map((tx) => tx.txid)
-      };
+      return processed;
+    }
+    appendTopoSortResult(queue, processed, round, validTxids, result) {
+      const byRound = [];
+      for (const tx of queue) {
+        if (!processed.has(tx.txid))
+          continue;
+        const txRound = round.get(tx.txid) ?? 0;
+        const bucket = byRound[txRound] ?? [];
+        bucket.push(tx);
+        byRound[txRound] = bucket;
+      }
+      for (const bucket of byRound) {
+        for (const tx of bucket ?? []) {
+          validTxids[tx.txid] = true;
+          result.push(tx);
+        }
+      }
     }
     /**
      * @returns a shallow copy of this beef
@@ -14061,9 +15592,17 @@ ${ifStackInfo}`;
       c.bumps = Array.from(this.bumps);
       c.txs = Array.from(this.txs);
       c.txidIndex = void 0;
+      c.txPositionIndex = void 0;
+      c.bumpIndexesByHeight = void 0;
+      c.bumpIndexByTxid = void 0;
       c.needsSort = this.needsSort;
+      c.sortResultCache = this.sortResultCache == null ? void 0 : this.cloneSortResult(this.sortResultCache);
+      if (c.sortResultCache != null)
+        c.captureSortTxState();
       c.hexCache = this.hexCache;
       c.rawBytesCache = this.rawBytesCache;
+      if (c.rawBytesCache != null)
+        c.captureSerializationState();
       return c;
     }
     /**
@@ -14071,47 +15610,54 @@ ${ifStackInfo}`;
      * @param knownTxids
      */
     trimKnownTxids(knownTxids) {
-      let mutated = false;
-      for (let i = 0; i < this.txs.length; ) {
-        const tx = this.txs[i];
-        if (tx.isTxidOnly && knownTxids.includes(tx.txid)) {
-          this.deleteFromIndex(tx.txid);
-          this.txs.splice(i, 1);
-          mutated = true;
-        } else {
-          i++;
-        }
+      let mutated = this.removeKnownTxidOnlyTxs(new Set(knownTxids));
+      mutated = this.reindexBumps() || mutated;
+      if (mutated) {
+        this.markMutated(true);
       }
+    }
+    /** Remove txidOnly entries that appear in knownTxids; return true if any were removed. */
+    removeKnownTxidOnlyTxs(knownTxids) {
+      const originalLength = this.txs.length;
+      this.txs = this.txs.filter((tx) => !(tx.isTxidOnly && knownTxids.has(tx.txid)));
+      const mutated = this.txs.length !== originalLength;
+      if (mutated)
+        this.rebuildTxIndexes();
+      return mutated;
+    }
+    /**
+     * Remove bumps that are no longer referenced by any tx and update bumpIndex references.
+     * Returns true if any bumps were removed.
+     */
+    reindexBumps() {
       const referencedBumpIndices = /* @__PURE__ */ new Set();
       for (const tx of this.txs) {
         if (tx.bumpIndex !== void 0) {
           referencedBumpIndices.add(tx.bumpIndex);
         }
       }
-      if (referencedBumpIndices.size < this.bumps.length) {
-        const indexMap = /* @__PURE__ */ new Map();
-        let newIndex = 0;
-        for (let i = 0; i < this.bumps.length; i++) {
-          if (referencedBumpIndices.has(i)) {
-            indexMap.set(i, newIndex);
-            newIndex++;
-          }
+      if (referencedBumpIndices.size >= this.bumps.length)
+        return false;
+      const indexMap = /* @__PURE__ */ new Map();
+      let newIndex = 0;
+      for (let i = 0; i < this.bumps.length; i++) {
+        if (referencedBumpIndices.has(i)) {
+          indexMap.set(i, newIndex);
+          newIndex++;
         }
-        this.bumps = this.bumps.filter((_, i) => referencedBumpIndices.has(i));
-        for (const tx of this.txs) {
-          if (tx.bumpIndex !== void 0) {
-            const newIndex2 = indexMap.get(tx.bumpIndex);
-            if (newIndex2 === void 0) {
-              throw new Error(`Internal error: bumpIndex ${tx.bumpIndex} not found in indexMap`);
-            }
-            tx.bumpIndex = newIndex2;
-          }
+      }
+      this.bumps = this.bumps.filter((_, i) => referencedBumpIndices.has(i));
+      for (const tx of this.txs) {
+        if (tx.bumpIndex === void 0)
+          continue;
+        const mapped = indexMap.get(tx.bumpIndex);
+        if (mapped === void 0) {
+          throw new Error(`Internal error: bumpIndex ${tx.bumpIndex} not found in indexMap`);
         }
-        mutated = true;
+        tx.bumpIndex = mapped;
       }
-      if (mutated) {
-        this.markMutated(true);
-      }
+      this.invalidateBumpIndexes();
+      return true;
     }
     /**
      * @returns array of transaction txids that either have a proof or whose inputs chain back to a proven transaction.
@@ -14154,8 +15700,9 @@ ${b.path[0].filter((n) => n.txid === true).map((n) => `      '${n.hash ?? ""}'`)
 `;
         }
         if (t.inputTxids.length > 0) {
+          const inputLines = t.inputTxids.map((it) => `      '${it}'`).join(",\n");
           log += `    inputs: [
-${t.inputTxids.map((it) => `      '${it}'`).join(",\n")}
+${inputLines}
     ]
 `;
         }
@@ -14163,26 +15710,32 @@ ${t.inputTxids.map((it) => `      '${it}'`).join(",\n")}
       return log;
     }
     /**
-    * In some circumstances it may be helpful for the BUMP MerklePaths to include
-    * leaves that can be computed from row zero.
-    */
+     * In some circumstances it may be helpful for the BUMP MerklePaths to include
+     * leaves that can be computed from row zero.
+     */
     addComputedLeaves() {
-      const hash = (m) => toHex(hash256(toArray2(m, "hex").reverse()).reverse());
       for (const bump of this.bumps) {
         for (let row = 1; row < bump.path.length; row++) {
-          for (const leafL of bump.path[row - 1]) {
-            if (typeof leafL.hash === "string" && (leafL.offset & 1) === 0) {
-              const leafR = bump.path[row - 1].find((l) => l.offset === leafL.offset + 1);
-              const offsetOnRow = leafL.offset >> 1;
-              if (leafR !== void 0 && typeof leafR.hash === "string" && bump.path[row].every((l) => l.offset !== offsetOnRow)) {
-                bump.path[row].push({
-                  offset: offsetOnRow,
-                  // String concatenation puts the right leaf on the left of the left leaf hash
-                  hash: hash(leafR.hash + leafL.hash)
-                });
-              }
-            }
-          }
+          this.addComputedLeavesForRow(bump, row);
+        }
+      }
+    }
+    /** Add any missing computable leaf at `row` derived from two known leaves at `row - 1`. */
+    addComputedLeavesForRow(bump, row) {
+      const hashPair2 = (m) => toHex(hash256(toArray2(m, "hex").reverse()).reverse());
+      for (const leafL of bump.path[row - 1]) {
+        if (typeof leafL.hash !== "string" || (leafL.offset & 1) !== 0)
+          continue;
+        const leafR = bump.path[row - 1].find((l) => l.offset === leafL.offset + 1);
+        if (leafR === void 0 || typeof leafR.hash !== "string")
+          continue;
+        const offsetOnRow = leafL.offset >> 1;
+        if (bump.path[row].every((l) => l.offset !== offsetOnRow)) {
+          bump.path[row].push({
+            offset: offsetOnRow,
+            // String concatenation puts the right leaf on the left of the left leaf hash
+            hash: hashPair2(leafR.hash + leafL.hash)
+          });
         }
       }
     }
@@ -14190,6 +15743,7 @@ ${t.inputTxids.map((it) => `      '${it}'`).join(",\n")}
   var Beef_default = Beef;
 
   // node_modules/@bsv/sdk/dist/esm/src/transaction/Transaction.js
+  var POST_CHRONICLE_HEIGHT_FALLBACK = 943816;
   var Transaction = class _Transaction {
     version;
     inputs;
@@ -14198,28 +15752,62 @@ ${t.inputTxids.map((it) => `      '${it}'`).join(",\n")}
     metadata;
     merklePath;
     cachedHash;
+    cachedIdHex;
     rawBytesCache;
+    efBytesCache;
     hexCache;
-    // Recursive function for adding merkle proofs or input transactions
-    static addPathOrInputs(obj, transactions, BUMPs) {
-      if (typeof obj.pathIndex === "number") {
-        const path = BUMPs[obj.pathIndex];
-        if (typeof path !== "object") {
-          throw new Error("Invalid merkle path index found in BEEF!");
+    activeSignatureHashCache;
+    rawCacheState;
+    /**
+     * Returns the transaction-wide signature hash cache active during signing.
+     * Callers outside a signing operation receive an isolated cache.
+     *
+     * @internal
+     */
+    getSignatureHashCache() {
+      return this.activeSignatureHashCache ?? { hashOutputsSingle: /* @__PURE__ */ new Map() };
+    }
+    completeSourceTransaction(tx, visiting, complete) {
+      for (const input of tx.inputs) {
+        if (input.sourceTXID == null && input.sourceTransaction != null) {
+          input.sourceTXID = input.sourceTransaction.id("hex");
         }
-        obj.tx.merklePath = path;
-      } else {
-        for (const input of obj.tx.inputs) {
-          if (input.sourceTXID === void 0) {
-            throw new Error("Input sourceTXID is undefined");
-          }
-          const sourceObj = transactions[input.sourceTXID];
-          if (typeof sourceObj !== "object") {
-            throw new Error(`Reference to unknown TXID in BEEF: ${input.sourceTXID ?? "undefined"}`);
-          }
-          input.sourceTransaction = sourceObj.tx;
-          this.addPathOrInputs(sourceObj, transactions, BUMPs);
+      }
+      visiting.delete(tx);
+      complete.add(tx);
+    }
+    scheduleSourceTransactions(tx, visiting, complete, stack) {
+      if (visiting.has(tx)) {
+        throw new Error("Cyclic source transaction graph");
+      }
+      visiting.add(tx);
+      stack.push({ tx, expanded: true });
+      for (let i = tx.inputs.length - 1; i >= 0; i--) {
+        const source = tx.inputs[i].sourceTransaction;
+        if (tx.inputs[i].sourceTXID == null && source != null && !complete.has(source)) {
+          stack.push({ tx: source, expanded: false });
         }
+      }
+    }
+    /**
+     * Iteratively materializes source transaction IDs so deep spend chains do not
+     * recurse through `hash()` while serializing their parents.
+     */
+    materializeSourceTXIDs() {
+      const complete = /* @__PURE__ */ new Set();
+      const visiting = /* @__PURE__ */ new Set();
+      const stack = [{ tx: this, expanded: false }];
+      while (stack.length > 0) {
+        const frame = stack.pop();
+        if (frame == null)
+          continue;
+        if (complete.has(frame.tx))
+          continue;
+        if (frame.expanded) {
+          this.completeSourceTransaction(frame.tx, visiting, complete);
+          continue;
+        }
+        this.scheduleSourceTransactions(frame.tx, visiting, complete, stack);
       }
     }
     /**
@@ -14236,6 +15824,13 @@ ${t.inputTxids.map((it) => `      '${it}'`).join(",\n")}
       return tx;
     }
     /**
+     * Zero-copy variant of {@link fromBEEF}. The caller must not mutate `beef`.
+     */
+    static fromBEEFView(beef, txid) {
+      const { tx } = _Transaction.fromAnyBeef(beef, txid, true);
+      return tx;
+    }
+    /**
      * Creates a new transaction from an Atomic BEEF (BRC-95) structure.
      * Extracts the subject transaction and supporting merkle path and source transactions contained in the BEEF data
      *
@@ -14245,26 +15840,47 @@ ${t.inputTxids.map((it) => `      '${it}'`).join(",\n")}
     static fromAtomicBEEF(beef) {
       const { tx, txid, beef: b } = _Transaction.fromAnyBeef(beef);
       if (txid !== b.atomicTxid) {
-        if (b.atomicTxid != null) {
-          throw new Error(`Transaction with TXID ${b.atomicTxid} not found in BEEF data.`);
-        } else {
+        if (b.atomicTxid == null) {
           throw new Error("beef must conform to BRC-95 and must contain the subject txid.");
+        } else {
+          throw new Error(`Transaction with TXID ${b.atomicTxid} not found in BEEF data.`);
         }
       }
+      if (!b.isAtomic(txid))
+        throw new Error("Atomic BEEF contains unrelated transaction data.");
       return tx;
     }
-    static fromAnyBeef(beef, txid) {
-      const b = Beef.fromBinary(beef);
+    /**
+     * Zero-copy variant of {@link fromAtomicBEEF}. The caller must not mutate
+     * `beef` while any linked transaction remains in use.
+     */
+    static fromAtomicBEEFView(beef) {
+      const { tx, txid, beef: b } = _Transaction.fromAnyBeef(beef, void 0, true);
+      if (txid !== b.atomicTxid) {
+        if (b.atomicTxid == null)
+          throw new Error("beef must conform to BRC-95 and must contain the subject txid.");
+        throw new Error(`Transaction with TXID ${b.atomicTxid} not found in BEEF data.`);
+      }
+      if (!b.isAtomic(txid))
+        throw new Error("Atomic BEEF contains unrelated transaction data.");
+      return tx;
+    }
+    static fromAnyBeef(beef, txid, zeroCopy = false) {
+      const b = zeroCopy && beef instanceof Uint8Array ? Beef.fromBinaryView(beef) : Beef.fromBinary(beef);
       if (b.txs.length < 1) {
         throw new Error("beef must include at least one transaction.");
       }
-      const target = txid ?? b.atomicTxid ?? b.txs.slice(-1)[0].txid;
+      const lastTx = b.txs.at(-1);
+      if (lastTx == null) {
+        throw new Error("beef must include at least one transaction.");
+      }
+      const target = txid ?? b.atomicTxid ?? lastTx.txid;
       const tx = b.findAtomicTransaction(target);
       if (tx == null) {
-        if (txid != null) {
-          throw new Error(`Transaction with TXID ${target} not found in BEEF data.`);
-        } else {
+        if (txid == null) {
           throw new Error("beef does not contain transaction for atomic txid.");
+        } else {
+          throw new Error(`Transaction with TXID ${String(target)} not found in BEEF data.`);
         }
       }
       return { tx, beef: b, txid: target };
@@ -14294,7 +15910,7 @@ ${t.inputTxids.map((it) => `      '${it}'`).join(",\n")}
         const lockingScriptBin = br.read(lockingScriptLength);
         const lockingScript = LockingScript.fromBinary(lockingScriptBin);
         const sourceTransaction = new _Transaction(void 0, [], [], void 0);
-        sourceTransaction.outputs = Array(sourceOutputIndex + 1).fill(null);
+        sourceTransaction.outputs = Array.from({ length: sourceOutputIndex + 1 }).fill(null);
         sourceTransaction.outputs[sourceOutputIndex] = {
           satoshis,
           lockingScript
@@ -14359,6 +15975,9 @@ ${t.inputTxids.map((it) => `      '${it}'`).join(",\n")}
       return { inputs, outputs };
     }
     static fromReader(br) {
+      return _Transaction.fromReaderInternal(br, false);
+    }
+    static fromReaderInternal(br, zeroCopyScripts) {
       const version = br.readUInt32LE();
       const inputsLength = br.readVarIntNum();
       const inputs = [];
@@ -14366,8 +15985,8 @@ ${t.inputTxids.map((it) => `      '${it}'`).join(",\n")}
         const sourceTXID = toHex(br.readReverse(32));
         const sourceOutputIndex = br.readUInt32LE();
         const scriptLength = br.readVarIntNum();
-        const scriptBin = br.read(scriptLength);
-        const unlockingScript = UnlockingScript.fromBinary(scriptBin);
+        const scriptBin = zeroCopyScripts && br instanceof ReaderUint8Array ? br.readView(scriptLength) : br.read(scriptLength);
+        const unlockingScript = zeroCopyScripts && scriptBin instanceof Uint8Array ? UnlockingScript.fromBinaryView(scriptBin) : UnlockingScript.fromBinary(scriptBin);
         const sequence = br.readUInt32LE();
         inputs.push({
           sourceTXID,
@@ -14381,8 +16000,8 @@ ${t.inputTxids.map((it) => `      '${it}'`).join(",\n")}
       for (let i = 0; i < outputsLength; i++) {
         const satoshis = br.readUInt64LEBn().toNumber();
         const scriptLength = br.readVarIntNum();
-        const scriptBin = br.read(scriptLength);
-        const lockingScript = LockingScript.fromBinary(scriptBin);
+        const scriptBin = zeroCopyScripts && br instanceof ReaderUint8Array ? br.readView(scriptLength) : br.read(scriptLength);
+        const lockingScript = zeroCopyScripts && scriptBin instanceof Uint8Array ? LockingScript.fromBinaryView(scriptBin) : LockingScript.fromBinary(scriptBin);
         outputs.push({
           satoshis,
           lockingScript
@@ -14399,11 +16018,24 @@ ${t.inputTxids.map((it) => `      '${it}'`).join(",\n")}
      * @returns {Transaction} - A new Transaction instance.
      */
     static fromBinary(bin) {
-      const copy = bin.slice();
-      const rawBytes = Uint8Array.from(copy);
+      const rawBytes = Uint8Array.from(bin);
       const br = new ReaderUint8Array(rawBytes);
-      const tx = _Transaction.fromReader(br);
+      const tx = _Transaction.fromReaderInternal(br, true);
       tx.rawBytesCache = rawBytes;
+      tx.captureSerializationState();
+      return tx;
+    }
+    /**
+     * Parses a transaction while retaining zero-copy views over `bin` for the raw
+     * transaction and its scripts. The caller must not mutate `bin`.
+     */
+    static fromBinaryView(bin) {
+      const br = new ReaderUint8Array(bin);
+      const tx = _Transaction.fromReaderInternal(br, true);
+      if (!br.eof())
+        throw new Error("Serialized transaction contains trailing data");
+      tx.rawBytesCache = bin;
+      tx.captureSerializationState();
       return tx;
     }
     /**
@@ -14416,9 +16048,10 @@ ${t.inputTxids.map((it) => `      '${it}'`).join(",\n")}
     static fromHex(hex) {
       const rawBytes = toUint8Array(hex, "hex");
       const br = new ReaderUint8Array(rawBytes);
-      const tx = _Transaction.fromReader(br);
+      const tx = _Transaction.fromReaderInternal(br, true);
       tx.rawBytesCache = rawBytes;
       tx.hexCache = toHex(rawBytes);
+      tx.captureSerializationState();
       return tx;
     }
     /**
@@ -14455,8 +16088,61 @@ ${t.inputTxids.map((it) => `      '${it}'`).join(",\n")}
     }
     invalidateSerializationCaches() {
       this.cachedHash = void 0;
+      this.cachedIdHex = void 0;
       this.rawBytesCache = void 0;
+      this.efBytesCache = void 0;
       this.hexCache = void 0;
+      this.rawCacheState = void 0;
+    }
+    sourceTransactionId(input) {
+      return input.sourceTXID == null ? input.sourceTransaction?.id("hex") : void 0;
+    }
+    captureSerializationState() {
+      this.rawCacheState = {
+        version: this.version,
+        lockTime: this.lockTime,
+        inputs: this.inputs.map((ref) => {
+          const sourceOutput = ref.sourceTransaction?.outputs[ref.sourceOutputIndex];
+          return {
+            ref,
+            sourceTXID: ref.sourceTXID,
+            sourceTransactionId: this.sourceTransactionId(ref),
+            sourceOutputIndex: ref.sourceOutputIndex,
+            sequence: ref.sequence,
+            unlockingScript: ref.unlockingScript,
+            unlockingScriptBytes: ref.unlockingScript?.toUint8Array(),
+            sourceOutput,
+            sourceSatoshis: sourceOutput?.satoshis,
+            sourceLockingScript: sourceOutput?.lockingScript,
+            sourceLockingScriptBytes: sourceOutput?.lockingScript.toUint8Array()
+          };
+        }),
+        outputs: this.outputs.map((ref) => ({
+          ref,
+          satoshis: ref.satoshis,
+          lockingScript: ref.lockingScript,
+          lockingScriptBytes: ref.lockingScript.toUint8Array()
+        }))
+      };
+    }
+    serializationCacheMatchesState() {
+      const cached = this.rawCacheState;
+      if (cached?.version !== this.version || cached.lockTime !== this.lockTime || cached.inputs.length !== this.inputs.length || cached.outputs.length !== this.outputs.length)
+        return false;
+      for (let i = 0; i < this.inputs.length; i++) {
+        const input = this.inputs[i];
+        const state = cached.inputs[i];
+        const sourceOutput = input.sourceTransaction?.outputs[input.sourceOutputIndex];
+        if (state.ref !== input || state.sourceTXID !== input.sourceTXID || state.sourceTransactionId !== this.sourceTransactionId(input) || state.sourceOutputIndex !== input.sourceOutputIndex || state.sequence !== input.sequence || state.unlockingScript !== input.unlockingScript || state.unlockingScriptBytes !== input.unlockingScript?.toUint8Array() || state.sourceOutput !== sourceOutput || state.sourceSatoshis !== sourceOutput?.satoshis || state.sourceLockingScript !== sourceOutput?.lockingScript || state.sourceLockingScriptBytes !== sourceOutput?.lockingScript.toUint8Array())
+          return false;
+      }
+      for (let i = 0; i < this.outputs.length; i++) {
+        const output = this.outputs[i];
+        const state = cached.outputs[i];
+        if (state.ref !== output || state.satoshis !== output.satoshis || state.lockingScript !== output.lockingScript || state.lockingScriptBytes !== output.lockingScript.toUint8Array())
+          return false;
+      }
+      return true;
     }
     /**
      * Adds a new input to the transaction.
@@ -14465,12 +16151,10 @@ ${t.inputTxids.map((it) => `      '${it}'`).join(",\n")}
      * @throws {Error} - If the input does not have a sourceTXID or sourceTransaction defined.
      */
     addInput(input) {
-      if (typeof input.sourceTXID === "undefined" && typeof input.sourceTransaction === "undefined") {
-        throw new Error("A reference to an an input transaction is required. If the input transaction itself cannot be referenced, its TXID must still be provided.");
+      if (input.sourceTXID === void 0 && input.sourceTransaction === void 0) {
+        throw new TypeError("A reference to an an input transaction is required. If the input transaction itself cannot be referenced, its TXID must still be provided.");
       }
-      if (typeof input.sequence === "undefined") {
-        input.sequence = 4294967295;
-      }
+      input.sequence ??= 4294967295;
       this.invalidateSerializationCaches();
       this.inputs.push(input);
     }
@@ -14480,10 +16164,10 @@ ${t.inputTxids.map((it) => `      '${it}'`).join(",\n")}
      * @param {TransactionOutput} output - The TransactionOutput object to add to the transaction.
      */
     addOutput(output) {
-      this.cachedHash = void 0;
+      this.invalidateSerializationCaches();
       if (output.change !== true) {
-        if (typeof output.satoshis === "undefined") {
-          throw new Error("either satoshis must be defined or change must be set to true");
+        if (output.satoshis === void 0) {
+          throw new TypeError("either satoshis must be defined or change must be set to true");
         }
         if (output.satoshis < 0) {
           throw new Error("satoshis must be a positive integer or zero");
@@ -14502,7 +16186,7 @@ ${t.inputTxids.map((it) => `      '${it}'`).join(",\n")}
      */
     addP2PKHOutput(address, satoshis) {
       const lockingScript = new P2PKH().lock(address);
-      if (typeof satoshis === "undefined") {
+      if (satoshis === void 0) {
         return this.addOutput({ lockingScript, change: true });
       }
       this.addOutput({
@@ -14551,7 +16235,7 @@ ${t.inputTxids.map((it) => `      '${it}'`).join(",\n")}
       let change = 0;
       for (const input of this.inputs) {
         if (typeof input.sourceTransaction !== "object") {
-          throw new Error("Source transactions are required for all inputs during fee computation");
+          throw new TypeError("Source transactions are required for all inputs during fee computation");
         }
         change += input.sourceTransaction.outputs[input.sourceOutputIndex].satoshis ?? 0;
       }
@@ -14574,18 +16258,18 @@ ${t.inputTxids.map((it) => `      '${it}'`).join(",\n")}
         distributedChange = this.distributeEqualChange(change, changeOutputs);
       }
       if (distributedChange < change) {
-        const lastOutput = this.outputs[this.outputs.length - 1];
-        if (lastOutput.satoshis !== void 0) {
-          lastOutput.satoshis += change - distributedChange;
-        } else {
+        const lastOutput = this.outputs.at(-1);
+        if (lastOutput.satoshis === void 0) {
           lastOutput.satoshis = change - distributedChange;
+        } else {
+          lastOutput.satoshis += change - distributedChange;
         }
       }
     }
     distributeRandomChange(change, changeOutputs) {
       let distributedChange = 0;
       let changeToUse = change;
-      const benfordNumbers = Array(changeOutputs.length).fill(1);
+      const benfordNumbers = Array.from({ length: changeOutputs.length }).fill(1);
       changeToUse -= changeOutputs.length;
       distributedChange += changeOutputs.length;
       for (let i = 0; i < changeOutputs.length - 1; i++) {
@@ -14610,7 +16294,7 @@ ${t.inputTxids.map((it) => `      '${it}'`).join(",\n")}
       return distributedChange;
     }
     benfordNumber(min, max) {
-      const d = Math.floor(Math.random() * 9) + 1;
+      const d = Random_default(1)[0] % 9 + 1;
       return Math.floor(min + (max - min) * Math.log10(1 + 1 / d) / Math.log10(10));
     }
     /**
@@ -14622,7 +16306,7 @@ ${t.inputTxids.map((it) => `      '${it}'`).join(",\n")}
       let totalIn = 0;
       for (const input of this.inputs) {
         if (typeof input.sourceTransaction !== "object") {
-          throw new Error("Source transactions or sourceSatoshis are required for all inputs to calculate fee");
+          throw new TypeError("Source transactions or sourceSatoshis are required for all inputs to calculate fee");
         }
         totalIn += input.sourceTransaction.outputs[input.sourceOutputIndex].satoshis ?? 0;
       }
@@ -14634,11 +16318,12 @@ ${t.inputTxids.map((it) => `      '${it}'`).join(",\n")}
     }
     /**
      * Signs a transaction, hydrating all its unlocking scripts based on the provided script templates where they are available.
+     * @param options - Signing behavior. Set `skipExistingSignatures` to preserve inputs that already have an unlocking script.
      */
-    async sign() {
+    async sign(options = {}) {
       this.invalidateSerializationCaches();
       for (const out of this.outputs) {
-        if (typeof out.satoshis === "undefined") {
+        if (out.satoshis === void 0) {
           if (out.change === true) {
             throw new Error("There are still change outputs with uncomputed amounts. Use the fee() method to compute the change amounts and transaction fees prior to signing.");
           } else {
@@ -14646,18 +16331,30 @@ ${t.inputTxids.map((it) => `      '${it}'`).join(",\n")}
           }
         }
       }
-      const unlockingScripts = await Promise.all(this.inputs.map(async (x, i) => {
-        if (typeof this.inputs[i].unlockingScriptTemplate === "object") {
-          return await this.inputs[i]?.unlockingScriptTemplate?.sign(this, i);
-        } else {
-          return await Promise.resolve(void 0);
-        }
-      }));
+      this.materializeSourceTXIDs();
+      const previousCache = this.activeSignatureHashCache;
+      this.activeSignatureHashCache = { hashOutputsSingle: /* @__PURE__ */ new Map() };
+      let unlockingScripts;
+      try {
+        unlockingScripts = await Promise.all(this.inputs.map(async (x, i) => {
+          if (options.skipExistingSignatures === true && this.inputs[i].unlockingScript != null) {
+            return this.inputs[i].unlockingScript;
+          }
+          if (typeof this.inputs[i].unlockingScriptTemplate === "object") {
+            return await this.inputs[i]?.unlockingScriptTemplate?.sign(this, i);
+          } else {
+            return await Promise.resolve(void 0);
+          }
+        }));
+      } finally {
+        this.activeSignatureHashCache = previousCache;
+      }
       for (let i = 0, l = this.inputs.length; i < l; i++) {
         if (typeof this.inputs[i].unlockingScriptTemplate === "object") {
           this.inputs[i].unlockingScript = unlockingScripts[i];
         }
       }
+      this.invalidateSerializationCaches();
     }
     /**
      * Broadcasts a transaction.
@@ -14672,11 +16369,11 @@ ${t.inputTxids.map((it) => `      '${it}'`).join(",\n")}
       writer.writeUInt32LE(this.version);
       writer.writeVarIntNum(this.inputs.length);
       for (const i of this.inputs) {
-        if (typeof i.sourceTXID === "undefined") {
-          if (i.sourceTransaction != null) {
-            writer.write(i.sourceTransaction.hash());
-          } else {
+        if (i.sourceTXID === void 0) {
+          if (i.sourceTransaction == null) {
             throw new Error("sourceTransaction is undefined");
+          } else {
+            writer.write(i.sourceTransaction.hash());
           }
         } else {
           writer.writeReverse(toArray2(i.sourceTXID, "hex"));
@@ -14705,8 +16402,10 @@ ${t.inputTxids.map((it) => `      '${it}'`).join(",\n")}
       return writer.toUint8Array();
     }
     getSerializedBytes() {
-      if (this.rawBytesCache == null) {
+      if (this.rawBytesCache == null || !this.serializationCacheMatchesState()) {
+        this.invalidateSerializationCaches();
         this.rawBytesCache = this.buildSerializedBytes();
+        this.captureSerializationState();
       }
       return this.rawBytesCache;
     }
@@ -14726,10 +16425,10 @@ ${t.inputTxids.map((it) => `      '${it}'`).join(",\n")}
       writer.write([0, 0, 0, 0, 0, 239]);
       writer.writeVarIntNum(this.inputs.length);
       for (const i of this.inputs) {
-        if (typeof i.sourceTransaction === "undefined") {
-          throw new Error("All inputs must have source transactions when serializing to EF format");
+        if (i.sourceTransaction === void 0) {
+          throw new TypeError("All inputs must have source transactions when serializing to EF format");
         }
-        if (typeof i.sourceTXID === "undefined") {
+        if (i.sourceTXID === void 0) {
           writer.write(i.sourceTransaction.hash());
         } else {
           writer.write(toArray2(i.sourceTXID, "hex").reverse());
@@ -14738,19 +16437,19 @@ ${t.inputTxids.map((it) => `      '${it}'`).join(",\n")}
         if (i.unlockingScript == null) {
           throw new Error("unlockingScript is undefined");
         }
-        const scriptBin = i.unlockingScript.toBinary();
+        const scriptBin = i.unlockingScript.toUint8Array();
         writer.writeVarIntNum(scriptBin.length);
         writer.write(scriptBin);
         writer.writeUInt32LE(i.sequence ?? 4294967295);
         writer.writeUInt64LE(i.sourceTransaction.outputs[i.sourceOutputIndex].satoshis ?? 0);
-        const lockingScriptBin = i.sourceTransaction.outputs[i.sourceOutputIndex].lockingScript.toBinary();
+        const lockingScriptBin = i.sourceTransaction.outputs[i.sourceOutputIndex].lockingScript.toUint8Array();
         writer.writeVarIntNum(lockingScriptBin.length);
         writer.write(lockingScriptBin);
       }
       writer.writeVarIntNum(this.outputs.length);
       for (const o of this.outputs) {
         writer.writeUInt64LE(o.satoshis ?? 0);
-        const scriptBin = o.lockingScript.toBinary();
+        const scriptBin = o.lockingScript.toUint8Array();
         writer.writeVarIntNum(scriptBin.length);
         writer.write(scriptBin);
       }
@@ -14762,19 +16461,40 @@ ${t.inputTxids.map((it) => `      '${it}'`).join(",\n")}
      * @returns {number[]} - The BRC-30 EF representation of the transaction.
      */
     toEF() {
-      const writer = new Writer();
-      this.writeEF(writer);
-      return writer.toArray();
+      return Array.from(this.getEFBytes());
     }
     /**
      * Converts the transaction to a BRC-30 EF format.
      *
+     * @remarks This is an alias for {@link toEFBinary}. The returned view is
+     * memoized for verifier hot paths and must be treated as immutable.
+     *
      * @returns {Uint8Array} - The BRC-30 EF representation of the transaction.
      */
     toEFUint8Array() {
-      const writer = new WriterUint8Array();
-      this.writeEF(writer);
-      return writer.toUint8Array();
+      return this.toEFBinary();
+    }
+    getEFBytes() {
+      if (this.efBytesCache == null || !this.serializationCacheMatchesState()) {
+        this.invalidateSerializationCaches();
+        const writer = new WriterUint8Array();
+        this.writeEF(writer);
+        this.efBytesCache = writer.toUint8Array();
+        this.captureSerializationState();
+      }
+      return this.efBytesCache;
+    }
+    /**
+     * Converts the transaction to a memoized BRC-30 EF byte array.
+     *
+     * @remarks The returned view is reused until transaction or referenced
+     * source-output serialization state changes. Treat it as immutable; call
+     * `.slice()` when an independently mutable copy is required.
+     *
+     * @returns {Uint8Array} The cached BRC-30 EF representation.
+     */
+    toEFBinary() {
+      return this.getEFBytes();
     }
     /**
      * Converts the transaction to a hexadecimal string EF.
@@ -14782,7 +16502,7 @@ ${t.inputTxids.map((it) => `      '${it}'`).join(",\n")}
      * @returns {string} - The hexadecimal string representation of the transaction EF.
      */
     toHexEF() {
-      return toHex(this.toEFUint8Array());
+      return toHex(this.toEFBinary());
     }
     /**
      * Converts the transaction to a hexadecimal string format.
@@ -14790,10 +16510,9 @@ ${t.inputTxids.map((it) => `      '${it}'`).join(",\n")}
      * @returns {string} - The hexadecimal string representation of the transaction.
      */
     toHex() {
-      if (this.hexCache != null) {
-        return this.hexCache;
-      }
       const bytes2 = this.getSerializedBytes();
+      if (this.hexCache != null)
+        return this.hexCache;
       const hex = toHex(bytes2);
       this.hexCache = hex;
       return hex;
@@ -14821,13 +16540,12 @@ ${t.inputTxids.map((it) => `      '${it}'`).join(",\n")}
      * @returns {string | number[]} - The hash of the transaction in the specified format.
      */
     hash(enc) {
-      if (this.cachedHash == null) {
-        this.cachedHash = hash256(this.getSerializedBytes());
-      }
+      const bytes2 = this.getSerializedBytes();
+      this.cachedHash ??= hash256(bytes2);
       if (enc === "hex") {
         return toHex(this.cachedHash);
       }
-      return this.cachedHash;
+      return Array.from(this.cachedHash);
     }
     /**
      * Calculates the transaction's ID.
@@ -14836,115 +16554,199 @@ ${t.inputTxids.map((it) => `      '${it}'`).join(",\n")}
      * @returns {string | number[]} - The ID of the transaction in the specified format.
      */
     id(enc) {
+      this.getSerializedBytes();
+      if (enc === "hex" && this.cachedIdHex != null)
+        return this.cachedIdHex;
       const id = [...this.hash()];
       id.reverse();
       if (enc === "hex") {
-        return toHex(id);
+        this.cachedIdHex = toHex(id);
+        return this.cachedIdHex;
       }
       return id;
+    }
+    async completeVerificationFromMerklePath(tx, scriptsOnly, chainTracker, getTxid, verifiedTransactions, verifiedTxids) {
+      if (typeof tx.merklePath !== "object")
+        return false;
+      if (scriptsOnly) {
+        verifiedTransactions.add(tx);
+        return true;
+      }
+      if (await tx.merklePath.verify(getTxid(), chainTracker)) {
+        verifiedTxids.add(getTxid());
+        return true;
+      }
+      throw new Error(`Invalid merkle path for transaction ${getTxid()}`);
+    }
+    async verifyTransactionFee(tx, feeModel, getTxid) {
+      if (feeModel === void 0)
+        return;
+      if (tx === void 0)
+        throw new Error("Transaction is undefined");
+      const copy = _Transaction.fromEF(tx.toEF());
+      delete copy.outputs[0].satoshis;
+      copy.outputs[0].change = true;
+      await copy.fee(feeModel);
+      if (tx.getFee() < copy.getFee()) {
+        throw new Error(`Verification failed because the transaction ${getTxid()} has an insufficient fee and has not been mined.`);
+      }
+    }
+    queueSourceTransactionForVerification(sourceTransaction, sourceTxid, state) {
+      if (state.scriptsOnly) {
+        if (!state.verifiedTransactions.has(sourceTransaction) && !state.queuedTransactions.has(sourceTransaction)) {
+          state.txQueue.push(sourceTransaction);
+          state.queuedTransactions.add(sourceTransaction);
+        }
+        return;
+      }
+      if (!state.verifiedTxids.has(sourceTxid) && !state.queuedTxids.has(sourceTxid)) {
+        state.txQueue.push(sourceTransaction);
+        state.queuedTxids.add(sourceTxid);
+      }
+    }
+    verifyTransactionInputs(tx, useVerifier, getTxid, state) {
+      let inputTotal = 0;
+      const sigHashCache = { hashOutputsSingle: /* @__PURE__ */ new Map() };
+      for (let index = 0; index < tx.inputs.length; index++) {
+        const input = tx.inputs[index];
+        if (typeof input.sourceTransaction !== "object") {
+          throw new TypeError(`Verification failed because the input at index ${index} of transaction ${getTxid()} is missing an associated source transaction. This source transaction is required for transaction verification because there is no merkle proof for the transaction spending a UTXO it contains.`);
+        }
+        if (typeof input.unlockingScript !== "object") {
+          throw new TypeError(`Verification failed because the input at index ${index} of transaction ${getTxid()} is missing an associated unlocking script. This script is required for transaction verification because there is no merkle proof for the transaction spending the UTXO.`);
+        }
+        const sourceTransaction = input.sourceTransaction;
+        const sourceOutput = sourceTransaction.outputs[input.sourceOutputIndex];
+        inputTotal += sourceOutput.satoshis ?? 0;
+        const sourceTxid = state.scriptsOnly && input.sourceTXID !== void 0 ? input.sourceTXID : sourceTransaction.id("hex");
+        this.queueSourceTransactionForVerification(sourceTransaction, sourceTxid, state);
+        input.sourceTXID ??= sourceTxid;
+        if (!useVerifier && !new Spend({
+          sourceTXID: input.sourceTXID,
+          sourceOutputIndex: input.sourceOutputIndex,
+          lockingScript: sourceOutput.lockingScript,
+          sourceSatoshis: sourceOutput.satoshis ?? 0,
+          transactionVersion: tx.version,
+          otherInputs: [],
+          allInputs: tx.inputs,
+          unlockingScript: input.unlockingScript,
+          inputSequence: input.sequence ?? 4294967295,
+          inputIndex: index,
+          outputs: tx.outputs,
+          lockTime: tx.lockTime,
+          memoryLimit: state.memoryLimit,
+          sigHashCache
+        }).validateJavaScript()) {
+          return { valid: false, inputTotal };
+        }
+      }
+      return { valid: true, inputTotal };
+    }
+    totalVerifiedOutputs(tx) {
+      let outputTotal = 0;
+      for (const output of tx.outputs) {
+        if (typeof output.satoshis !== "number") {
+          throw new TypeError("Every output must have a defined amount during transaction verification.");
+        }
+        outputTotal += output.satoshis;
+      }
+      return outputTotal;
+    }
+    async verifyQueuedScripts(verifierQueue, selectedVerifier) {
+      if (verifierQueue.length === 0 || selectedVerifier === void 0)
+        return;
+      const scriptVerdicts = selectedVerifier.verifyScriptsBatch === void 0 ? await Promise.all(verifierQueue.map(async (params) => await selectedVerifier.verifyScripts(params))) : await selectedVerifier.verifyScriptsBatch(verifierQueue);
+      if (scriptVerdicts.length !== verifierQueue.length) {
+        throw new Error("Script verifier returned an invalid batch result count");
+      }
+      const failedIndex = scriptVerdicts.findIndex((valid) => !valid);
+      if (failedIndex >= 0) {
+        throw new Error(`Script verification failed for transaction ${verifierQueue[failedIndex].tx.id("hex")}`);
+      }
+    }
+    isTransactionAlreadyVerified(tx, getTxid, state) {
+      return state.scriptsOnly ? state.verifiedTransactions.has(tx) : state.verifiedTxids.has(getTxid());
+    }
+    async verifyUnminedTransaction(tx, getTxid, context) {
+      const { feeModel, memoryLimit, selectedVerifier, verifierQueue } = context;
+      await this.verifyTransactionFee(tx, feeModel, getTxid);
+      const verifierParams = {
+        tx,
+        blockHeight: POST_CHRONICLE_HEIGHT_FALLBACK,
+        consensus: true,
+        ...memoryLimit === void 0 ? {} : { memoryLimit }
+      };
+      const useVerifier = selectedVerifier !== void 0 && (memoryLimit === void 0 || selectedVerifier.supportsMemoryLimit === true) && (selectedVerifier.shouldVerifyScripts?.(verifierParams) ?? true);
+      const inputVerification = this.verifyTransactionInputs(tx, useVerifier, getTxid, context);
+      if (!inputVerification.valid)
+        return false;
+      if (useVerifier)
+        verifierQueue.push(verifierParams);
+      if (this.totalVerifiedOutputs(tx) > inputVerification.inputTotal)
+        return false;
+      if (context.scriptsOnly)
+        context.verifiedTransactions.add(tx);
+      else
+        context.verifiedTxids.add(getTxid());
+      return true;
     }
     /**
      * Verifies the legitimacy of the Bitcoin transaction according to the rules of SPV by ensuring all the input transactions link back to valid block headers, the chain of spends for all inputs are valid, and the sum of inputs is not less than the sum of outputs.
      *
      * @param chainTracker - An instance of ChainTracker, a Bitcoin block header tracker. If the value is set to 'scripts only', headers will not be verified. If not provided then the default chain tracker will be used.
      * @param feeModel - An instance of FeeModel, a fee model to use for fee calculation. If not provided then the default fee model will be used.
-     * @param memoryLimit - The maximum memory in bytes usage allowed for script evaluation. If not provided then the default memory limit will be used.
+     * @param memoryLimit - Optional caller-supplied local script-interpreter
+     * memory budget. If omitted, post-Genesis validation does not impose an
+     * arbitrary SDK memory cap.
+     * @param verifier - An optional asynchronous script backend. Adaptive backends may decline before execution to preserve the JavaScript path.
      *
      * @returns Whether the transaction is valid according to the rules of SPV.
      *
      * @example tx.verify(new WhatsOnChain(), LivePolicy.getInstance())
      */
-    async verify(chainTracker = defaultChainTracker(), feeModel, memoryLimit) {
+    async verify(chainTracker = defaultChainTracker(), feeModel, memoryLimit, verifier) {
+      const scriptsOnly = chainTracker === "scripts only";
+      const selectedVerifier = verifier ?? scriptVerificationBackend();
+      if (!scriptsOnly)
+        this.materializeSourceTXIDs();
       const verifiedTxids = /* @__PURE__ */ new Set();
+      const verifiedTransactions = /* @__PURE__ */ new Set();
       const txQueue = [this];
-      while (txQueue.length > 0) {
-        const tx = txQueue.shift();
-        const txid = tx?.id("hex") ?? "";
-        if (txid != null && txid !== "" && verifiedTxids.has(txid)) {
+      const queuedTxids = /* @__PURE__ */ new Set();
+      if (!scriptsOnly)
+        queuedTxids.add(this.id("hex"));
+      const queuedTransactions = new Set(txQueue);
+      const verifierQueue = [];
+      const verificationContext = {
+        scriptsOnly,
+        memoryLimit,
+        txQueue,
+        queuedTransactions,
+        queuedTxids,
+        verifiedTransactions,
+        verifiedTxids,
+        feeModel,
+        selectedVerifier,
+        verifierQueue
+      };
+      let queueIndex = 0;
+      while (queueIndex < txQueue.length) {
+        const tx = txQueue[queueIndex++];
+        let txid;
+        const getTxid = () => {
+          txid ??= tx.id("hex");
+          return txid;
+        };
+        if (this.isTransactionAlreadyVerified(tx, getTxid, verificationContext)) {
           continue;
         }
-        if (typeof tx?.merklePath === "object") {
-          if (chainTracker === "scripts only") {
-            if (txid != null) {
-              verifiedTxids.add(txid);
-            }
-            continue;
-          } else {
-            const proofValid = await tx.merklePath.verify(txid, chainTracker);
-            if (proofValid) {
-              verifiedTxids.add(txid);
-              continue;
-            } else {
-              throw new Error(`Invalid merkle path for transaction ${txid}`);
-            }
-          }
+        if (await this.completeVerificationFromMerklePath(tx, scriptsOnly, chainTracker, getTxid, verifiedTransactions, verifiedTxids)) {
+          continue;
         }
-        if (typeof feeModel !== "undefined") {
-          if (tx === void 0) {
-            throw new Error("Transaction is undefined");
-          }
-          const cpTx = _Transaction.fromEF(tx.toEF());
-          delete cpTx.outputs[0].satoshis;
-          cpTx.outputs[0].change = true;
-          await cpTx.fee(feeModel);
-          if (tx.getFee() < cpTx.getFee()) {
-            throw new Error(`Verification failed because the transaction ${txid} has an insufficient fee and has not been mined.`);
-          }
-        }
-        let inputTotal = 0;
-        if (tx === void 0) {
-          throw new Error("Transaction is undefined");
-        }
-        for (let i = 0; i < tx.inputs.length; i++) {
-          const input = tx.inputs[i];
-          if (typeof input.sourceTransaction !== "object") {
-            throw new Error(`Verification failed because the input at index ${i} of transaction ${txid} is missing an associated source transaction. This source transaction is required for transaction verification because there is no merkle proof for the transaction spending a UTXO it contains.`);
-          }
-          if (typeof input.unlockingScript !== "object") {
-            throw new Error(`Verification failed because the input at index ${i} of transaction ${txid} is missing an associated unlocking script. This script is required for transaction verification because there is no merkle proof for the transaction spending the UTXO.`);
-          }
-          const sourceOutput = input.sourceTransaction.outputs[input.sourceOutputIndex];
-          inputTotal += sourceOutput.satoshis ?? 0;
-          const sourceTxid = input.sourceTransaction.id("hex");
-          if (!verifiedTxids.has(sourceTxid)) {
-            txQueue.push(input.sourceTransaction);
-          }
-          const otherInputs = tx.inputs.filter((_, idx) => idx !== i);
-          if (typeof input.sourceTXID === "undefined") {
-            input.sourceTXID = sourceTxid;
-          }
-          const spend = new Spend({
-            sourceTXID: input.sourceTXID,
-            sourceOutputIndex: input.sourceOutputIndex,
-            lockingScript: sourceOutput.lockingScript,
-            sourceSatoshis: sourceOutput.satoshis ?? 0,
-            transactionVersion: tx.version,
-            otherInputs,
-            unlockingScript: input.unlockingScript,
-            inputSequence: input.sequence ?? 4294967295,
-            // default to max sequence
-            inputIndex: i,
-            outputs: tx.outputs,
-            lockTime: tx.lockTime,
-            memoryLimit
-          });
-          const spendValid = spend.validate();
-          if (!spendValid) {
-            return false;
-          }
-        }
-        let outputTotal = 0;
-        for (const out of tx.outputs) {
-          if (typeof out.satoshis !== "number") {
-            throw new Error("Every output must have a defined amount during transaction verification.");
-          }
-          outputTotal += out.satoshis;
-        }
-        if (outputTotal > inputTotal) {
+        if (!await this.verifyUnminedTransaction(tx, getTxid, verificationContext))
           return false;
-        }
-        verifiedTxids.add(txid);
       }
+      await this.verifyQueuedScripts(verifierQueue, selectedVerifier);
       return true;
     }
     /**
@@ -14957,70 +16759,101 @@ ${t.inputTxids.map((it) => `      '${it}'`).join(",\n")}
      * @throws Error if there are any missing sourceTransactions unless `allowPartial` is true.
      */
     writeSerializedBEEF(writer, allowPartial) {
+      this.materializeSourceTXIDs();
       writer.writeUInt32LE(BEEF_V1);
-      const BUMPs = [];
-      const bumpIndexByInstance = /* @__PURE__ */ new Map();
-      const bumpIndexByRoot = /* @__PURE__ */ new Map();
-      const txs = [];
-      const seenTxids = /* @__PURE__ */ new Set();
-      const getBumpIndex = (merklePath) => {
-        const existingByInstance = bumpIndexByInstance.get(merklePath);
-        if (existingByInstance !== void 0) {
-          return existingByInstance;
-        }
-        const key = `${merklePath.blockHeight}:${merklePath.computeRoot()}`;
-        const existingByRoot = bumpIndexByRoot.get(key);
-        if (existingByRoot !== void 0) {
-          BUMPs[existingByRoot].combine(merklePath);
-          bumpIndexByInstance.set(merklePath, existingByRoot);
-          return existingByRoot;
-        }
-        const newIndex = BUMPs.length;
-        BUMPs.push(merklePath);
-        bumpIndexByInstance.set(merklePath, newIndex);
-        bumpIndexByRoot.set(key, newIndex);
-        return newIndex;
-      };
-      const addPathsAndInputs = (tx) => {
-        const txid = tx.id("hex");
-        if (seenTxids.has(txid)) {
-          return;
-        }
-        const obj = { tx };
-        const merklePath = tx.merklePath;
-        const hasProof = typeof merklePath === "object";
-        if (hasProof && merklePath != null) {
-          obj.pathIndex = getBumpIndex(merklePath);
-        }
-        if (!hasProof) {
-          for (let i = tx.inputs.length - 1; i >= 0; i--) {
-            const input = tx.inputs[i];
-            if (typeof input.sourceTransaction === "object") {
-              addPathsAndInputs(input.sourceTransaction);
-            } else if (allowPartial === false) {
-              throw new Error("A required source transaction is missing!");
-            }
-          }
-        }
-        seenTxids.add(txid);
-        txs.push(obj);
-      };
-      addPathsAndInputs(this);
-      writer.writeVarIntNum(BUMPs.length);
-      for (const b of BUMPs) {
-        writer.write(b.toBinary());
+      const { bumps, txs } = this.collectBEEFTransactions(allowPartial);
+      writer.writeVarIntNum(bumps.length);
+      const bumpBytes = this.reserveBEEFWriter(writer, bumps, txs);
+      for (let i = 0; i < bumps.length; i++) {
+        writer.write(bumpBytes?.[i] ?? bumps[i].toBinary());
       }
       writer.writeVarIntNum(txs.length);
-      for (const t of txs) {
-        writer.write(t.tx.toBinary());
-        if (typeof t.pathIndex === "number") {
+      for (const item of txs) {
+        writer.write(item.tx.toUint8Array());
+        if (typeof item.pathIndex === "number") {
           writer.writeUInt8(1);
-          writer.writeVarIntNum(t.pathIndex);
+          writer.writeVarIntNum(item.pathIndex);
         } else {
           writer.writeUInt8(0);
         }
       }
-      return writer.toArray();
+    }
+    collectBEEFTransactions(allowPartial) {
+      const bumps = [];
+      const bumpIndexByInstance = /* @__PURE__ */ new Map();
+      const bumpIndexByRoot = /* @__PURE__ */ new Map();
+      const txs = [];
+      const seenTxids = /* @__PURE__ */ new Set();
+      const scheduledTxids = /* @__PURE__ */ new Set();
+      const stack = [{ tx: this, expanded: false }];
+      while (stack.length > 0) {
+        const frame = stack.pop();
+        if (frame == null)
+          continue;
+        if (frame.expanded) {
+          this.appendBEEFTransaction(frame.tx, seenTxids, txs, bumps, bumpIndexByInstance, bumpIndexByRoot);
+          continue;
+        }
+        this.scheduleBEEFTransaction(frame.tx, allowPartial, scheduledTxids, stack);
+      }
+      return { bumps, txs };
+    }
+    appendBEEFTransaction(tx, seenTxids, txs, bumps, bumpIndexByInstance, bumpIndexByRoot) {
+      const txid = tx.id("hex");
+      if (seenTxids.has(txid))
+        return;
+      const item = { tx };
+      if (tx.merklePath != null) {
+        item.pathIndex = this.getBEEFPathIndex(tx.merklePath, bumps, bumpIndexByInstance, bumpIndexByRoot);
+      }
+      seenTxids.add(txid);
+      txs.push(item);
+    }
+    scheduleBEEFTransaction(tx, allowPartial, scheduledTxids, stack) {
+      const txid = tx.id("hex");
+      if (scheduledTxids.has(txid))
+        return;
+      scheduledTxids.add(txid);
+      stack.push({ tx, expanded: true });
+      if (tx.merklePath != null)
+        return;
+      for (const input of tx.inputs) {
+        const source = input.sourceTransaction;
+        if (source != null)
+          stack.push({ tx: source, expanded: false });
+        else if (allowPartial === false)
+          throw new Error("A required source transaction is missing!");
+      }
+    }
+    getBEEFPathIndex(merklePath, bumps, bumpIndexByInstance, bumpIndexByRoot) {
+      const existingByInstance = bumpIndexByInstance.get(merklePath);
+      if (existingByInstance !== void 0)
+        return existingByInstance;
+      const key = `${merklePath.blockHeight}:${merklePath.computeRoot()}`;
+      const existingByRoot = bumpIndexByRoot.get(key);
+      if (existingByRoot !== void 0) {
+        bumps[existingByRoot].combine(merklePath);
+        bumpIndexByInstance.set(merklePath, existingByRoot);
+        return existingByRoot;
+      }
+      const newIndex = bumps.length;
+      bumps.push(merklePath);
+      bumpIndexByInstance.set(merklePath, newIndex);
+      bumpIndexByRoot.set(key, newIndex);
+      return newIndex;
+    }
+    reserveBEEFWriter(writer, bumps, txs) {
+      let bumpBytes;
+      if (writer instanceof WriterUint8Array) {
+        bumpBytes = bumps.map((bump) => bump.toBinaryUint8Array());
+        let remainingBytes = 16;
+        for (const bytes2 of bumpBytes)
+          remainingBytes += bytes2.length;
+        for (const item of txs)
+          remainingBytes += item.tx.toUint8Array().length + 10;
+        writer.reserve(remainingBytes);
+      }
+      return bumpBytes;
     }
     /**
      * Serializes this transaction, together with its inputs and the respective merkle proofs, into the BEEF (BRC-62) format. This enables efficient verification of its compliance with the rules of SPV.
@@ -15042,11 +16875,24 @@ ${t.inputTxids.map((it) => `      '${it}'`).join(",\n")}
      *
      * @returns {number[]} The serialized BEEF structure
      * @throws Error if there are any missing sourceTransactions unless `allowPartial` is true.
+     * @deprecated This historical method returns a legacy `number[]` at runtime
+     * despite its declared type. Use {@link toBEEFBytes} for a real Uint8Array.
      */
     toBEEFUint8Array(allowPartial) {
       const writer = new WriterUint8Array();
       this.writeSerializedBEEF(writer, allowPartial);
       return writer.toArray();
+    }
+    /**
+     * Serializes BEEF to a real typed byte array.
+     *
+     * @remarks This replaces the historical `toBEEFUint8Array` method, whose
+     * runtime value is a legacy `number[]` despite its declared return type.
+     */
+    toBEEFBytes(allowPartial) {
+      const writer = new WriterUint8Array();
+      this.writeSerializedBEEF(writer, allowPartial);
+      return writer.toUint8Array();
     }
     /**
      * Serializes this transaction and its inputs into the Atomic BEEF (BRC-95) format.
@@ -15060,6 +16906,7 @@ ${t.inputTxids.map((it) => `      '${it}'`).join(",\n")}
      * @throws Error if there are any missing sourceTransactions unless `allowPartial` is true.
      */
     toAtomicBEEF(allowPartial) {
+      this.materializeSourceTXIDs();
       const prefix = [1, 1, 1, 1];
       const txHash = this.hash();
       const beefData = this.toBEEF(allowPartial);
@@ -15077,6 +16924,7 @@ ${t.inputTxids.map((it) => `      '${it}'`).join(",\n")}
      * @throws Error if there are any missing sourceTransactions unless `allowPartial` is true.
      */
     toAtomicBEEFUint8Array(allowPartial) {
+      this.materializeSourceTXIDs();
       const writer = new WriterUint8Array();
       const prefix = [1, 1, 1, 1];
       writer.write(prefix);
@@ -15101,6 +16949,22 @@ ${t.inputTxids.map((it) => `      '${it}'`).join(",\n")}
       const inputCount = this.inputs.length;
       const outputCount = this.outputs.length;
       const description = actionDescription ?? `Transaction with ${inputCount} input(s) and ${outputCount} output(s)`;
+      const hasTemplates = this.inputs.some((input) => input.unlockingScriptTemplate != null);
+      const actionArgs = await this.buildWalletActionArgs(description, hasTemplates);
+      const atomicBEEF = hasTemplates ? await this.completeWalletTemplateAction(wallet, actionArgs, originator, options) : await this.completeWalletScriptAction(wallet, actionArgs, originator, options);
+      const newTransaction = _Transaction.fromAtomicBEEF(atomicBEEF);
+      this.version = newTransaction.version;
+      this.inputs = newTransaction.inputs;
+      this.outputs = newTransaction.outputs;
+      this.lockTime = newTransaction.lockTime;
+      this.merklePath = newTransaction.merklePath;
+      this.invalidateSerializationCaches();
+      this.metadata = {
+        ...this.metadata,
+        ...newTransaction.metadata
+      };
+    }
+    async buildWalletActionArgs(description, hasTemplates) {
       const actionArgs = {
         description,
         inputs: [],
@@ -15108,112 +16972,94 @@ ${t.inputTxids.map((it) => `      '${it}'`).join(",\n")}
         lockTime: this.lockTime,
         version: this.version
       };
-      const hasTemplates = this.inputs.some((input) => input.unlockingScriptTemplate != null);
+      this.materializeSourceTXIDs();
       const beefData = new Beef();
-      for (let i = 0; i < this.inputs.length; i++) {
-        const input = this.inputs[i];
+      for (let index = 0; index < this.inputs.length; index++) {
+        const input = this.inputs[index];
         if (input.sourceTransaction == null) {
           throw new Error("All inputs must have a sourceTransaction when using completeWithWallet");
         }
-        const sourceBEEF = input.sourceTransaction.toBEEF();
-        beefData.mergeBeef(sourceBEEF);
-        const sourceTXID = input.sourceTransaction.id("hex");
-        const inputArg = {
-          outpoint: `${sourceTXID}.${input.sourceOutputIndex}`,
-          inputDescription: "Input from source transaction",
-          sequenceNumber: input.sequence
-        };
-        if (hasTemplates) {
-          if (input.unlockingScriptTemplate != null) {
-            const estimatedLength = await input.unlockingScriptTemplate.estimateLength(this, i);
-            inputArg.unlockingScriptLength = estimatedLength;
-          } else if (input.unlockingScript != null) {
-            inputArg.unlockingScript = input.unlockingScript.toHex();
-          } else {
-            throw new Error(`Input ${i} must have either an unlockingScript or unlockingScriptTemplate`);
-          }
-        } else {
-          if (input.unlockingScript == null) {
-            throw new Error("All inputs must have an unlockingScript when using completeWithWallet");
-          }
-          inputArg.unlockingScript = input.unlockingScript.toHex();
-        }
-        actionArgs.inputs.push(inputArg);
+        beefData.mergeTransaction(input.sourceTransaction);
+        actionArgs.inputs.push(await this.buildWalletInputArg(input, index, hasTemplates));
       }
-      if (this.inputs.length > 0) {
-        actionArgs.inputBEEF = beefData.toBinary();
-      }
-      for (const output of this.outputs) {
-        actionArgs.outputs.push({
-          satoshis: output.satoshis,
-          lockingScript: output.lockingScript.toHex(),
-          outputDescription: "Output from source transaction"
-        });
-      }
-      if (this.metadata?.labels != null && Array.isArray(this.metadata.labels)) {
+      if (this.inputs.length > 0)
+        actionArgs.inputBEEF = beefData.toUint8Array();
+      actionArgs.outputs = this.outputs.map((output) => ({
+        satoshis: output.satoshis,
+        lockingScript: output.lockingScript.toHex(),
+        outputDescription: "Output from source transaction"
+      }));
+      if (Array.isArray(this.metadata?.labels))
         actionArgs.labels = this.metadata.labels;
-      }
-      let atomicBEEF;
-      if (hasTemplates) {
-        actionArgs.options = {
-          ...options,
-          signAndProcess: false
-        };
-        const { signableTransaction } = await wallet.createAction(actionArgs, originator);
-        if (signableTransaction == null) {
-          throw new Error("Wallet createAction did not return signableTransaction");
-        }
-        const partialTx = _Transaction.fromBEEF(signableTransaction.tx);
-        const spends = {};
-        for (let i = 0; i < this.inputs.length; i++) {
-          const input = this.inputs[i];
-          if (input.unlockingScriptTemplate != null) {
-            const unlockingScript = await input.unlockingScriptTemplate.sign(partialTx, i);
-            spends[i] = {
-              unlockingScript: unlockingScript.toHex()
-            };
-          } else if (input.unlockingScript != null) {
-            spends[i] = {
-              unlockingScript: input.unlockingScript.toHex()
-            };
-          }
-        }
-        const signActionOptions = options != null ? {
-          acceptDelayedBroadcast: options.acceptDelayedBroadcast,
-          returnTXIDOnly: options.returnTXIDOnly,
-          noSend: options.noSend,
-          sendWith: options.sendWith
-        } : void 0;
-        const signResult = await wallet.signAction({
-          reference: signableTransaction.reference,
-          spends,
-          options: signActionOptions
-        }, originator);
-        if (signResult.tx == null) {
-          throw new Error("Wallet signAction did not return transaction data");
-        }
-        atomicBEEF = signResult.tx;
-      } else {
-        if (options != null) {
-          actionArgs.options = options;
-        }
-        const { tx } = await wallet.createAction(actionArgs, originator);
-        if (tx == null) {
-          throw new Error("Wallet createAction did not return transaction data");
-        }
-        atomicBEEF = tx;
-      }
-      const newTransaction = _Transaction.fromAtomicBEEF(atomicBEEF);
-      this.version = newTransaction.version;
-      this.inputs = newTransaction.inputs;
-      this.outputs = newTransaction.outputs;
-      this.lockTime = newTransaction.lockTime;
-      this.merklePath = newTransaction.merklePath;
-      this.cachedHash = newTransaction.cachedHash;
-      this.metadata = {
-        ...this.metadata,
-        ...newTransaction.metadata
+      return actionArgs;
+    }
+    async buildWalletInputArg(input, index, hasTemplates) {
+      const inputArg = {
+        outpoint: `${input.sourceTransaction.id("hex")}.${input.sourceOutputIndex}`,
+        inputDescription: "Input from source transaction",
+        sequenceNumber: input.sequence
       };
+      if (!hasTemplates) {
+        if (input.unlockingScript == null) {
+          throw new Error("All inputs must have an unlockingScript when using completeWithWallet");
+        }
+        inputArg.unlockingScript = input.unlockingScript.toHex();
+        return inputArg;
+      }
+      if (input.unlockingScriptTemplate != null) {
+        inputArg.unlockingScriptLength = await input.unlockingScriptTemplate.estimateLength(this, index);
+      } else if (input.unlockingScript != null) {
+        inputArg.unlockingScript = input.unlockingScript.toHex();
+      } else {
+        throw new Error(`Input ${index} must have either an unlockingScript or unlockingScriptTemplate`);
+      }
+      return inputArg;
+    }
+    async completeWalletTemplateAction(wallet, actionArgs, originator, options) {
+      actionArgs.options = { ...options, signAndProcess: false };
+      const { signableTransaction } = await wallet.createAction(actionArgs, originator);
+      if (signableTransaction == null) {
+        throw new Error("Wallet createAction did not return signableTransaction");
+      }
+      const partialTx = _Transaction.fromBEEF(signableTransaction.tx);
+      const spends = await this.buildWalletSpends(partialTx);
+      const signActionOptions = options == null ? void 0 : {
+        acceptDelayedBroadcast: options.acceptDelayedBroadcast,
+        returnTXIDOnly: options.returnTXIDOnly,
+        noSend: options.noSend,
+        sendWith: options.sendWith
+      };
+      const signResult = await wallet.signAction({
+        reference: signableTransaction.reference,
+        spends,
+        options: signActionOptions
+      }, originator);
+      if (signResult.tx == null) {
+        throw new Error("Wallet signAction did not return transaction data");
+      }
+      return signResult.tx;
+    }
+    async buildWalletSpends(partialTx) {
+      const spends = {};
+      for (let index = 0; index < this.inputs.length; index++) {
+        const input = this.inputs[index];
+        if (input.unlockingScriptTemplate != null) {
+          const unlockingScript = await input.unlockingScriptTemplate.sign(partialTx, index);
+          spends[index] = { unlockingScript: unlockingScript.toHex() };
+        } else if (input.unlockingScript != null) {
+          spends[index] = { unlockingScript: input.unlockingScript.toHex() };
+        }
+      }
+      return spends;
+    }
+    async completeWalletScriptAction(wallet, actionArgs, originator, options) {
+      if (options != null)
+        actionArgs.options = options;
+      const { tx } = await wallet.createAction(actionArgs, originator);
+      if (tx == null) {
+        throw new Error("Wallet createAction did not return transaction data");
+      }
+      return tx;
     }
     /**
      * Returns the formatted preimage of a transaction for the requested input index, signature scope (default SIGHASH_FORKID | SIGHASH_ALL), and optional subscript.
@@ -15244,13 +17090,13 @@ ${t.inputTxids.map((it) => `      '${it}'`).join(",\n")}
       if (output == null) {
         throw new Error(`Source transaction's output at index ${input.sourceOutputIndex} is required`);
       }
-      const otherInputs = this.inputs.filter((_, index) => index !== inputIndex);
       return TransactionSignature.format({
         sourceTXID: input.sourceTXID ?? input.sourceTransaction.id("hex"),
         sourceOutputIndex: input.sourceOutputIndex,
         sourceSatoshis: output.satoshis,
         transactionVersion: this.version,
-        otherInputs,
+        otherInputs: [],
+        allInputs: this.inputs,
         inputIndex,
         outputs: this.outputs,
         inputSequence: input.sequence ?? 4294967295,
@@ -15258,2481 +17104,6 @@ ${t.inputTxids.map((it) => `      '${it}'`).join(",\n")}
         lockTime: this.lockTime,
         scope: signatureScope
       });
-    }
-  };
-
-  // node_modules/@bsv/sdk/dist/esm/src/compat/ECIES.js
-  function AES2(key) {
-    if (this._tables[0][0][0] === 0)
-      this._precompute();
-    let tmp, encKey, decKey;
-    const sbox = this._tables[0][4];
-    const decTable = this._tables[1];
-    const keyLen = key.length;
-    let rcon = 1;
-    if (keyLen !== 4 && keyLen !== 6 && keyLen !== 8) {
-      throw new Error("invalid aes key size");
-    }
-    this._key = [encKey = key.slice(0), decKey = []];
-    let i;
-    for (i = keyLen; i < 4 * keyLen + 28; i++) {
-      tmp = encKey[i - 1];
-      if (i % keyLen === 0 || keyLen === 8 && i % keyLen === 4) {
-        tmp = sbox[tmp >>> 24] << 24 ^ sbox[tmp >> 16 & 255] << 16 ^ sbox[tmp >> 8 & 255] << 8 ^ sbox[tmp & 255];
-        if (i % keyLen === 0) {
-          tmp = tmp << 8 ^ tmp >>> 24 ^ rcon << 24;
-          rcon = rcon << 1 ^ (rcon >> 7) * 283;
-        }
-      }
-      encKey[i] = encKey[i - keyLen] ^ tmp;
-    }
-    for (let j = 0; i > 0; j++, i--) {
-      tmp = encKey[(j & 3) !== 0 ? i : i - 4];
-      if (i <= 4 || j < 4) {
-        decKey[j] = tmp;
-      } else {
-        decKey[j] = decTable[0][sbox[tmp >>> 24]] ^ decTable[1][sbox[tmp >> 16 & 255]] ^ decTable[2][sbox[tmp >> 8 & 255]] ^ decTable[3][sbox[tmp & 255]];
-      }
-    }
-  }
-  AES2.prototype = {
-    /**
-     * Encrypt an array of 4 big-endian words.
-     * @param {Array} data The plaintext.
-     * @return {Array} The ciphertext.
-     */
-    encrypt: function(data) {
-      return this._crypt(data, 0);
-    },
-    /**
-     * Decrypt an array of 4 big-endian words.
-     * @param {Array} data The ciphertext.
-     * @return {Array} The plaintext.
-     */
-    decrypt: function(data) {
-      return this._crypt(data, 1);
-    },
-    /**
-     * The expanded S-box and inverse S-box tables.  These will be computed
-     * on the client so that we don't have to send them down the wire.
-     *
-     * There are two tables, _tables[0] is for encryption and
-     * _tables[1] is for decryption.
-     *
-     * The first 4 sub-tables are the expanded S-box with MixColumns.  The
-     * last (_tables[01][4]) is the S-box itself.
-     *
-     * @private
-     */
-    _tables: [
-      [
-        new Uint32Array(256),
-        new Uint32Array(256),
-        new Uint32Array(256),
-        new Uint32Array(256),
-        new Uint32Array(256)
-      ],
-      [
-        new Uint32Array(256),
-        new Uint32Array(256),
-        new Uint32Array(256),
-        new Uint32Array(256),
-        new Uint32Array(256)
-      ]
-    ],
-    // Expand the S-box tables.
-    _precompute: function() {
-      const encTable = this._tables[0];
-      const decTable = this._tables[1];
-      const sbox = encTable[4];
-      const sboxInv = decTable[4];
-      let i;
-      let x;
-      let xInv;
-      const d = new Uint8Array(256);
-      const th = new Uint8Array(256);
-      let x2;
-      let x4;
-      let x8;
-      let s2;
-      let tEnc;
-      let tDec;
-      for (i = 0; i < 256; i++) {
-        th[(d[i] = i << 1 ^ (i >> 7) * 283) ^ i] = i;
-      }
-      for (x = xInv = 0; sbox[x] === 0; x ^= x2 !== 0 ? x2 : 1, xInv = th[xInv] !== 0 ? th[xInv] : 1) {
-        s2 = xInv ^ xInv << 1 ^ xInv << 2 ^ xInv << 3 ^ xInv << 4;
-        s2 = s2 >> 8 ^ s2 & 255 ^ 99;
-        sbox[x] = s2;
-        sboxInv[s2] = x;
-        x8 = d[x4 = d[x2 = d[x]]];
-        tDec = x8 * 16843009 ^ x4 * 65537 ^ x2 * 257 ^ x * 16843008;
-        tEnc = d[s2] * 257 ^ s2 * 16843008;
-        for (i = 0; i < 4; i++) {
-          encTable[i][x] = tEnc = tEnc << 24 ^ tEnc >>> 8;
-          decTable[i][s2] = tDec = tDec << 24 ^ tDec >>> 8;
-        }
-      }
-    },
-    /**
-     * Encryption and decryption core.
-     * @param {Array} input Four words to be encrypted or decrypted.
-     * @param dir The direction, 0 for encrypt and 1 for decrypt.
-     * @return {Array} The four encrypted or decrypted words.
-     * @private
-     */
-    _crypt: function(input, dir) {
-      if (input.length !== 4) {
-        throw new Error("invalid aes block size");
-      }
-      const key = this._key[dir];
-      let a = input[0] ^ key[0];
-      let b = input[dir === 1 ? 3 : 1] ^ key[1];
-      let c = input[2] ^ key[2];
-      let d = input[dir === 1 ? 1 : 3] ^ key[3];
-      let a2;
-      let b2;
-      let c2;
-      const nInnerRounds = key.length / 4 - 2;
-      let i;
-      let kIndex = 4;
-      const out = new Uint32Array(4);
-      const table = this._tables[dir];
-      const t0 = table[0];
-      const t1 = table[1];
-      const t2 = table[2];
-      const t3 = table[3];
-      const sbox = table[4];
-      for (i = 0; i < nInnerRounds; i++) {
-        a2 = t0[a >>> 24] ^ t1[b >> 16 & 255] ^ t2[c >> 8 & 255] ^ t3[d & 255] ^ key[kIndex];
-        b2 = t0[b >>> 24] ^ t1[c >> 16 & 255] ^ t2[d >> 8 & 255] ^ t3[a & 255] ^ key[kIndex + 1];
-        c2 = t0[c >>> 24] ^ t1[d >> 16 & 255] ^ t2[a >> 8 & 255] ^ t3[b & 255] ^ key[kIndex + 2];
-        d = t0[d >>> 24] ^ t1[a >> 16 & 255] ^ t2[b >> 8 & 255] ^ t3[c & 255] ^ key[kIndex + 3];
-        kIndex += 4;
-        a = a2;
-        b = b2;
-        c = c2;
-      }
-      for (i = 0; i < 4; i++) {
-        out[dir === 1 ? 3 & -i : i] = sbox[a >>> 24] << 24 ^ sbox[b >> 16 & 255] << 16 ^ sbox[c >> 8 & 255] << 8 ^ sbox[d & 255] ^ key[kIndex++];
-        a2 = a;
-        a = b;
-        b = c;
-        c = d;
-        d = a2;
-      }
-      return out;
-    }
-  };
-
-  // node_modules/@bsv/sdk/dist/esm/src/wallet/Wallet.interfaces.js
-  var SecurityLevels;
-  (function(SecurityLevels2) {
-    SecurityLevels2[SecurityLevels2["Silent"] = 0] = "Silent";
-    SecurityLevels2[SecurityLevels2["App"] = 1] = "App";
-    SecurityLevels2[SecurityLevels2["Counterparty"] = 2] = "Counterparty";
-  })(SecurityLevels || (SecurityLevels = {}));
-
-  // node_modules/@bsv/sdk/dist/esm/src/wallet/KeyDeriver.js
-  var KeyDeriver = class {
-    cacheSharedSecret;
-    retrieveCachedSharedSecret;
-    rootKey;
-    identityKey;
-    anyone;
-    /**
-     * Initializes the KeyDeriver instance with a root private key.
-     * @param {PrivateKey | 'anyone'} rootKey - The root private key or the string 'anyone'.
-     */
-    constructor(rootKey, cacheSharedSecret, retrieveCachedSharedSecret) {
-      this.cacheSharedSecret = cacheSharedSecret;
-      this.retrieveCachedSharedSecret = retrieveCachedSharedSecret;
-      this.anyone = new PrivateKey(1).toPublicKey();
-      if (rootKey === "anyone") {
-        this.rootKey = new PrivateKey(1);
-      } else {
-        this.rootKey = rootKey;
-      }
-      this.identityKey = this.rootKey.toPublicKey().toString();
-    }
-    /**
-     * Derives a public key based on protocol ID, key ID, and counterparty.
-     * @param {WalletProtocol} protocolID - The protocol ID including a security level and protocol name.
-     * @param {string} keyID - The key identifier.
-     * @param {Counterparty} counterparty - The counterparty's public key or a predefined value ('self' or 'anyone').
-     * @param {boolean} [forSelf=false] - Whether deriving for self.
-     * @returns {PublicKey} - The derived public key.
-     */
-    derivePublicKey(protocolID, keyID, counterparty, forSelf = false) {
-      counterparty = this.normalizeCounterparty(counterparty);
-      if (forSelf) {
-        return this.rootKey.deriveChild(counterparty, this.computeInvoiceNumber(protocolID, keyID), this.cacheSharedSecret, this.retrieveCachedSharedSecret).toPublicKey();
-      } else {
-        return counterparty.deriveChild(this.rootKey, this.computeInvoiceNumber(protocolID, keyID), this.cacheSharedSecret, this.retrieveCachedSharedSecret);
-      }
-    }
-    /**
-     * Derives a private key based on protocol ID, key ID, and counterparty.
-     * @param {WalletProtocol} protocolID - The protocol ID including a security level and protocol name.
-     * @param {string} keyID - The key identifier.
-     * @param {Counterparty} counterparty - The counterparty's public key or a predefined value ('self' or 'anyone').
-     * @returns {PrivateKey} - The derived private key.
-     */
-    derivePrivateKey(protocolID, keyID, counterparty) {
-      counterparty = this.normalizeCounterparty(counterparty);
-      return this.rootKey.deriveChild(counterparty, this.computeInvoiceNumber(protocolID, keyID), this.cacheSharedSecret, this.retrieveCachedSharedSecret);
-    }
-    /**
-     * Derives a symmetric key based on protocol ID, key ID, and counterparty.
-     * Note: Symmetric keys should not be derivable by everyone due to security risks.
-     * @param {WalletProtocol} protocolID - The protocol ID including a security level and protocol name.
-     * @param {string} keyID - The key identifier.
-     * @param {Counterparty} counterparty - The counterparty's public key or a predefined value ('self' or 'anyone').
-     * @returns {SymmetricKey} - The derived symmetric key.
-     */
-    deriveSymmetricKey(protocolID, keyID, counterparty) {
-      if (counterparty === "anyone") {
-        counterparty = this.anyone;
-      } else {
-        counterparty = this.normalizeCounterparty(counterparty);
-      }
-      const derivedPublicKey = this.derivePublicKey(protocolID, keyID, counterparty);
-      const derivedPrivateKey = this.derivePrivateKey(protocolID, keyID, counterparty);
-      return new SymmetricKey(derivedPrivateKey.deriveSharedSecret(derivedPublicKey)?.x?.toArray() ?? []);
-    }
-    /**
-     * Reveals the shared secret between the root key and the counterparty.
-     * Note: This should not be used for 'self'.
-     * @param {Counterparty} counterparty - The counterparty's public key or a predefined value ('self' or 'anyone').
-     * @returns {number[]} - The shared secret as a number array.
-     * @throws {Error} - Throws an error if attempting to reveal a shared secret for 'self'.
-     */
-    revealCounterpartySecret(counterparty) {
-      if (counterparty === "self") {
-        throw new Error("Counterparty secrets cannot be revealed for counterparty=self.");
-      }
-      counterparty = this.normalizeCounterparty(counterparty);
-      const self2 = this.rootKey.toPublicKey();
-      const keyDerivedBySelf = this.rootKey.deriveChild(self2, "test").toHex();
-      const keyDerivedByCounterparty = this.rootKey.deriveChild(counterparty, "test").toHex();
-      if (keyDerivedBySelf === keyDerivedByCounterparty) {
-        throw new Error("Counterparty secrets cannot be revealed for counterparty=self.");
-      }
-      return this.rootKey.deriveSharedSecret(counterparty).encode(true);
-    }
-    /**
-     * Reveals the specific key association for a given protocol ID, key ID, and counterparty.
-     * @param {Counterparty} counterparty - The counterparty's public key or a predefined value ('self' or 'anyone').
-     * @param {WalletProtocol} protocolID - The protocol ID including a security level and protocol name.
-     * @param {string} keyID - The key identifier.
-     * @returns {number[]} - The specific key association as a number array.
-     */
-    revealSpecificSecret(counterparty, protocolID, keyID) {
-      counterparty = this.normalizeCounterparty(counterparty);
-      const sharedSecret = this.rootKey.deriveSharedSecret(counterparty);
-      const invoiceNumberBin = utils_exports.toArray(this.computeInvoiceNumber(protocolID, keyID), "utf8");
-      return Hash_exports.sha256hmac(sharedSecret.encode(true), invoiceNumberBin);
-    }
-    /**
-     * Normalizes the counterparty to a public key.
-     * @param {Counterparty} counterparty - The counterparty's public key or a predefined value ('self' or 'anyone').
-     * @returns {PublicKey} - The normalized counterparty public key.
-     * @throws {Error} - Throws an error if the counterparty is invalid.
-     */
-    normalizeCounterparty(counterparty) {
-      if (counterparty === null || counterparty === void 0) {
-        throw new Error("counterparty must be self, anyone or a public key!");
-      } else if (counterparty === "self") {
-        return this.rootKey.toPublicKey();
-      } else if (counterparty === "anyone") {
-        return new PrivateKey(1).toPublicKey();
-      } else if (typeof counterparty === "string") {
-        return PublicKey.fromString(counterparty);
-      } else {
-        return counterparty;
-      }
-    }
-    /**
-     * Computes the invoice number based on the protocol ID and key ID.
-     * @param {WalletProtocol} protocolID - The protocol ID including a security level and protocol name.
-     * @param {string} keyID - The key identifier.
-     * @returns {string} - The computed invoice number.
-     * @throws {Error} - Throws an error if protocol ID or key ID are invalid.
-     */
-    computeInvoiceNumber(protocolID, keyID) {
-      const securityLevel = protocolID[0];
-      if (!Number.isInteger(securityLevel) || securityLevel < 0 || securityLevel > 2) {
-        throw new Error("Protocol security level must be 0, 1, or 2");
-      }
-      const protocolName = protocolID[1].toLowerCase().trim();
-      if (keyID.length > 800) {
-        throw new Error("Key IDs must be 800 characters or less");
-      }
-      if (keyID.length < 1) {
-        throw new Error("Key IDs must be 1 character or more");
-      }
-      if (protocolName.length > 400) {
-        if (protocolName.startsWith("specific linkage revelation ")) {
-          if (protocolName.length > 430) {
-            throw new Error("Specific linkage revelation protocol names must be 430 characters or less");
-          }
-        } else {
-          throw new Error("Protocol names must be 400 characters or less");
-        }
-      }
-      if (protocolName.length < 5) {
-        throw new Error("Protocol names must be 5 characters or more");
-      }
-      if (protocolName.includes("  ")) {
-        throw new Error('Protocol names cannot contain multiple consecutive spaces ("  ")');
-      }
-      if (!/^[a-z0-9 ]+$/g.test(protocolName)) {
-        throw new Error("Protocol names can only contain letters, numbers and spaces");
-      }
-      if (protocolName.endsWith(" protocol")) {
-        throw new Error('No need to end your protocol name with " protocol"');
-      }
-      return `${securityLevel}-${protocolName}-${keyID}`;
-    }
-  };
-
-  // node_modules/@bsv/sdk/dist/esm/src/wallet/CachedKeyDeriver.js
-  var CachedKeyDeriver = class {
-    keyDeriver;
-    cache;
-    maxCacheSize;
-    /**
-     * The root key from which all other keys are derived.
-     */
-    rootKey;
-    /**
-     * The identity of this key deriver which is normally the public key associated with the `rootKey`
-     */
-    identityKey;
-    /**
-     * Initializes the CachedKeyDeriver instance with a root private key and optional cache settings.
-     * @param {PrivateKey | 'anyone'} rootKey - The root private key or the string 'anyone'.
-     * @param {Object} [options] - Optional settings for the cache.
-     * @param {number} [options.maxCacheSize=1000] - The maximum number of entries to store in the cache.
-     */
-    constructor(rootKey, options) {
-      if (rootKey === "anyone") {
-        this.rootKey = new PrivateKey(1);
-      } else {
-        this.rootKey = rootKey;
-      }
-      this.keyDeriver = new KeyDeriver(this.rootKey, (priv, pub, point) => {
-        this.cacheSet(`${priv.toString()}-${pub.toString()}`, point);
-      }, (priv, pub) => {
-        return this.cacheGet(`${priv.toString()}-${pub.toString()}`);
-      });
-      this.identityKey = this.rootKey.toPublicKey().toString();
-      this.cache = /* @__PURE__ */ new Map();
-      const maxCacheSize = options?.maxCacheSize;
-      this.maxCacheSize = maxCacheSize != null && !isNaN(maxCacheSize) && maxCacheSize > 0 ? maxCacheSize : 1e3;
-    }
-    /**
-     * Derives a public key based on protocol ID, key ID, and counterparty.
-     * Caches the result for future calls with the same parameters.
-     * @param {WalletProtocol} protocolID - The protocol ID including a security level and protocol name.
-     * @param {string} keyID - The key identifier.
-     * @param {Counterparty} counterparty - The counterparty's public key or a predefined value ('self' or 'anyone').
-     * @param {boolean} [forSelf=false] - Whether deriving for self.
-     * @returns {PublicKey} - The derived public key.
-     */
-    derivePublicKey(protocolID, keyID, counterparty, forSelf = false) {
-      const cacheKey = this.generateCacheKey("derivePublicKey", protocolID, keyID, counterparty, forSelf);
-      if (this.cache.has(cacheKey)) {
-        const cachedValue = this.cacheGet(cacheKey);
-        if (cachedValue === void 0) {
-          throw new Error("Cached value is undefined");
-        }
-        return cachedValue;
-      } else {
-        const result = this.keyDeriver.derivePublicKey(protocolID, keyID, counterparty, forSelf);
-        this.cacheSet(cacheKey, result);
-        return result;
-      }
-    }
-    /**
-     * Derives a private key based on protocol ID, key ID, and counterparty.
-     * Caches the result for future calls with the same parameters.
-     * @param {WalletProtocol} protocolID - The protocol ID including a security level and protocol name.
-     * @param {string} keyID - The key identifier.
-     * @param {Counterparty} counterparty - The counterparty's public key or a predefined value ('self' or 'anyone').
-     * @returns {PrivateKey} - The derived private key.
-     */
-    derivePrivateKey(protocolID, keyID, counterparty) {
-      const cacheKey = this.generateCacheKey("derivePrivateKey", protocolID, keyID, counterparty);
-      if (this.cache.has(cacheKey)) {
-        const cachedValue = this.cacheGet(cacheKey);
-        if (cachedValue === void 0) {
-          throw new Error("Cached value is undefined");
-        }
-        return cachedValue;
-      } else {
-        const result = this.keyDeriver.derivePrivateKey(protocolID, keyID, counterparty);
-        this.cacheSet(cacheKey, result);
-        return result;
-      }
-    }
-    /**
-     * Derives a symmetric key based on protocol ID, key ID, and counterparty.
-     * Caches the result for future calls with the same parameters.
-     * @param {WalletProtocol} protocolID - The protocol ID including a security level and protocol name.
-     * @param {string} keyID - The key identifier.
-     * @param {Counterparty} counterparty - The counterparty's public key or a predefined value ('self' or 'anyone').
-     * @returns {SymmetricKey} - The derived symmetric key.
-     * @throws {Error} - Throws an error if attempting to derive a symmetric key for 'anyone'.
-     */
-    deriveSymmetricKey(protocolID, keyID, counterparty) {
-      const cacheKey = this.generateCacheKey("deriveSymmetricKey", protocolID, keyID, counterparty);
-      if (this.cache.has(cacheKey)) {
-        const cachedValue = this.cacheGet(cacheKey);
-        if (cachedValue === void 0) {
-          throw new Error("Cached value is undefined");
-        }
-        return cachedValue;
-      } else {
-        const result = this.keyDeriver.deriveSymmetricKey(protocolID, keyID, counterparty);
-        this.cacheSet(cacheKey, result);
-        return result;
-      }
-    }
-    /**
-     * Reveals the shared secret between the root key and the counterparty.
-     * Caches the result for future calls with the same parameters.
-     * @param {Counterparty} counterparty - The counterparty's public key or a predefined value ('self' or 'anyone').
-     * @returns {number[]} - The shared secret as a number array.
-     * @throws {Error} - Throws an error if attempting to reveal a shared secret for 'self'.
-     */
-    revealCounterpartySecret(counterparty) {
-      const cacheKey = this.generateCacheKey("revealCounterpartySecret", counterparty);
-      if (this.cache.has(cacheKey)) {
-        const cachedValue = this.cacheGet(cacheKey);
-        if (cachedValue === void 0) {
-          throw new Error("Cached value is undefined");
-        }
-        return cachedValue;
-      } else {
-        const result = this.keyDeriver.revealCounterpartySecret(counterparty);
-        this.cacheSet(cacheKey, result);
-        return result;
-      }
-    }
-    /**
-     * Reveals the specific key association for a given protocol ID, key ID, and counterparty.
-     * Caches the result for future calls with the same parameters.
-     * @param {Counterparty} counterparty - The counterparty's public key or a predefined value ('self' or 'anyone').
-     * @param {WalletProtocol} protocolID - The protocol ID including a security level and protocol name.
-     * @param {string} keyID - The key identifier.
-     * @returns {number[]} - The specific key association as a number array.
-     */
-    revealSpecificSecret(counterparty, protocolID, keyID) {
-      const cacheKey = this.generateCacheKey("revealSpecificSecret", counterparty, protocolID, keyID);
-      if (this.cache.has(cacheKey)) {
-        const cachedValue = this.cacheGet(cacheKey);
-        if (cachedValue === void 0) {
-          throw new Error("Cached value is undefined");
-        }
-        return cachedValue;
-      } else {
-        const result = this.keyDeriver.revealSpecificSecret(counterparty, protocolID, keyID);
-        this.cacheSet(cacheKey, result);
-        return result;
-      }
-    }
-    /**
-     * Generates a unique cache key based on the method name and input parameters.
-     * @param {string} methodName - The name of the method.
-     * @param {...any} args - The arguments passed to the method.
-     * @returns {string} - The generated cache key.
-     */
-    generateCacheKey(methodName, ...args) {
-      const serializedArgs = args.map((arg) => this.serializeArgument(arg)).join("|");
-      return `${methodName}|${serializedArgs}`;
-    }
-    /**
-     * Serializes an argument to a string for use in a cache key.
-     * @param {any} arg - The argument to serialize.
-     * @returns {string} - The serialized argument.
-     */
-    serializeArgument(arg) {
-      if (arg instanceof PublicKey || arg instanceof PrivateKey) {
-        return arg.toString();
-      } else if (Array.isArray(arg)) {
-        return arg.map((item) => this.serializeArgument(item)).join(",");
-      } else if (typeof arg === "object" && arg !== null) {
-        return JSON.stringify(arg);
-      } else {
-        return String(arg);
-      }
-    }
-    /**
-     * Retrieves an item from the cache and updates its position to reflect recent use.
-     * @param {string} cacheKey - The key of the cached item.
-     * @returns {any} - The cached value.
-     */
-    cacheGet(cacheKey) {
-      const value = this.cache.get(cacheKey);
-      this.cache.delete(cacheKey);
-      if (value !== void 0) {
-        this.cache.set(cacheKey, value);
-      }
-      return value;
-    }
-    /**
-     * Adds an item to the cache and evicts the least recently used item if necessary.
-     * @param {string} cacheKey - The key of the item to cache.
-     * @param {any} value - The value to cache.
-     */
-    cacheSet(cacheKey, value) {
-      if (this.cache.size >= this.maxCacheSize) {
-        const firstKey = this.cache.keys().next().value;
-        this.cache.delete(firstKey);
-      }
-      this.cache.set(cacheKey, value);
-    }
-  };
-
-  // node_modules/@bsv/sdk/dist/esm/src/wallet/ProtoWallet.js
-  var ProtoWallet = class {
-    keyDeriver;
-    constructor(rootKeyOrKeyDeriver) {
-      if (typeof rootKeyOrKeyDeriver.identityKey !== "string") {
-        rootKeyOrKeyDeriver = new CachedKeyDeriver(rootKeyOrKeyDeriver);
-      }
-      this.keyDeriver = rootKeyOrKeyDeriver;
-    }
-    async getPublicKey(args) {
-      if (args.identityKey) {
-        if (this.keyDeriver == null) {
-          throw new Error("keyDeriver is undefined");
-        }
-        return { publicKey: this.keyDeriver.rootKey.toPublicKey().toString() };
-      } else {
-        if (args.protocolID == null || args.keyID == null || args.keyID === "") {
-          throw new Error("protocolID and keyID are required if identityKey is false or undefined.");
-        }
-        const keyDeriver = this.keyDeriver ?? (() => {
-          throw new Error("keyDeriver is undefined");
-        })();
-        return {
-          publicKey: keyDeriver.derivePublicKey(args.protocolID, args.keyID, args.counterparty ?? "self", args.forSelf).toString()
-        };
-      }
-    }
-    async revealCounterpartyKeyLinkage(args) {
-      const { publicKey: identityKey } = await this.getPublicKey({
-        identityKey: true
-      });
-      if (this.keyDeriver == null) {
-        throw new Error("keyDeriver is undefined");
-      }
-      const linkage = this.keyDeriver.revealCounterpartySecret(args.counterparty);
-      const linkageProof = new Schnorr().generateProof(this.keyDeriver.rootKey, this.keyDeriver.rootKey.toPublicKey(), PublicKey.fromString(args.counterparty), Point.fromDER(linkage));
-      const linkageProofBin = [
-        ...linkageProof.R.encode(true),
-        ...linkageProof.SPrime.encode(true),
-        ...linkageProof.z.toArray()
-      ];
-      const revelationTime = (/* @__PURE__ */ new Date()).toISOString();
-      const { ciphertext: encryptedLinkage } = await this.encrypt({
-        plaintext: linkage,
-        protocolID: [2, "counterparty linkage revelation"],
-        keyID: revelationTime,
-        counterparty: args.verifier
-      });
-      const { ciphertext: encryptedLinkageProof } = await this.encrypt({
-        plaintext: linkageProofBin,
-        protocolID: [2, "counterparty linkage revelation"],
-        keyID: revelationTime,
-        counterparty: args.verifier
-      });
-      return {
-        prover: identityKey,
-        verifier: args.verifier,
-        counterparty: args.counterparty,
-        revelationTime,
-        encryptedLinkage,
-        encryptedLinkageProof
-      };
-    }
-    async revealSpecificKeyLinkage(args) {
-      const { publicKey: identityKey } = await this.getPublicKey({
-        identityKey: true
-      });
-      if (this.keyDeriver == null) {
-        throw new Error("keyDeriver is undefined");
-      }
-      const linkage = this.keyDeriver.revealSpecificSecret(args.counterparty, args.protocolID, args.keyID);
-      const { ciphertext: encryptedLinkage } = await this.encrypt({
-        plaintext: linkage,
-        protocolID: [
-          2,
-          `specific linkage revelation ${args.protocolID[0]} ${args.protocolID[1]}`
-        ],
-        keyID: args.keyID,
-        counterparty: args.verifier
-      });
-      const { ciphertext: encryptedLinkageProof } = await this.encrypt({
-        plaintext: [0],
-        // Proof type 0, no proof provided
-        protocolID: [
-          2,
-          `specific linkage revelation ${args.protocolID[0]} ${args.protocolID[1]}`
-        ],
-        keyID: args.keyID,
-        counterparty: args.verifier
-      });
-      return {
-        prover: identityKey,
-        verifier: args.verifier,
-        counterparty: args.counterparty,
-        protocolID: args.protocolID,
-        keyID: args.keyID,
-        encryptedLinkage,
-        encryptedLinkageProof,
-        proofType: 0
-      };
-    }
-    async encrypt(args) {
-      if (this.keyDeriver == null) {
-        throw new Error("keyDeriver is undefined");
-      }
-      const key = this.keyDeriver.deriveSymmetricKey(args.protocolID, args.keyID, args.counterparty ?? "self");
-      return { ciphertext: key.encrypt(args.plaintext) };
-    }
-    async decrypt(args, originator) {
-      if (this.keyDeriver == null) {
-        throw new Error("keyDeriver is undefined");
-      }
-      const key = this.keyDeriver.deriveSymmetricKey(args.protocolID, args.keyID, args.counterparty ?? "self");
-      return { plaintext: key.decrypt(args.ciphertext) };
-    }
-    async createHmac(args) {
-      if (this.keyDeriver == null) {
-        throw new Error("keyDeriver is undefined");
-      }
-      const key = this.keyDeriver.deriveSymmetricKey(args.protocolID, args.keyID, args.counterparty ?? "self");
-      return { hmac: Hash_exports.sha256hmac(key.toArray(), args.data) };
-    }
-    async verifyHmac(args) {
-      if (this.keyDeriver == null) {
-        throw new Error("keyDeriver is undefined");
-      }
-      const key = this.keyDeriver.deriveSymmetricKey(args.protocolID, args.keyID, args.counterparty ?? "self");
-      const computed = Hash_exports.sha256hmac(key.toArray(), args.data);
-      const provided = args.hmac;
-      const valid = constantTimeEquals(toArray2(computed), toArray2(provided));
-      if (!valid) {
-        const e = new Error("HMAC is not valid");
-        e.code = "ERR_INVALID_HMAC";
-        throw e;
-      }
-      return { valid };
-    }
-    async createSignature(args) {
-      if (args.hashToDirectlySign == null && args.data == null) {
-        throw new Error("args.data or args.hashToDirectlySign must be valid");
-      }
-      const hash = args.hashToDirectlySign ?? Hash_exports.sha256(args.data ?? []);
-      const keyDeriver = this.keyDeriver ?? (() => {
-        throw new Error("keyDeriver is undefined");
-      })();
-      const key = keyDeriver.derivePrivateKey(args.protocolID, args.keyID, args.counterparty ?? "anyone");
-      return {
-        signature: ECDSA_exports.sign(new BigNumber(hash), key, true).toDER()
-      };
-    }
-    async verifySignature(args) {
-      if (args.hashToDirectlyVerify == null && args.data == null) {
-        throw new Error("args.data or args.hashToDirectlyVerify must be valid");
-      }
-      const hash = args.hashToDirectlyVerify ?? Hash_exports.sha256(args.data ?? []);
-      const keyDeriver = this.keyDeriver ?? (() => {
-        throw new Error("keyDeriver is undefined");
-      })();
-      const key = keyDeriver.derivePublicKey(args.protocolID, args.keyID, args.counterparty ?? "self", args.forSelf);
-      const valid = ECDSA_exports.verify(new BigNumber(hash), Signature.fromDER(args.signature), key);
-      if (!valid) {
-        const e = new Error("Signature is not valid");
-        e.code = "ERR_INVALID_SIGNATURE";
-        throw e;
-      }
-      return { valid };
-    }
-  };
-  var ProtoWallet_default = ProtoWallet;
-
-  // node_modules/@bsv/sdk/dist/esm/src/wallet/substrates/window.CWI.js
-  var WindowCWISubstrate = class {
-    CWI;
-    constructor() {
-      if (typeof window !== "object") {
-        throw new Error("The window.CWI substrate requires a global window object.");
-      }
-      if (typeof window.CWI !== "object") {
-        throw new Error("The window.CWI interface does not appear to be bound to the window object.");
-      }
-      this.CWI = window.CWI;
-    }
-    async createAction(args, originator) {
-      return await this.CWI.createAction(args, originator);
-    }
-    async signAction(args, originator) {
-      return await this.CWI.signAction(args, originator);
-    }
-    async abortAction(args, originator) {
-      return await this.CWI.abortAction(args, originator);
-    }
-    async listActions(args, originator) {
-      return await this.CWI.listActions(args, originator);
-    }
-    async internalizeAction(args, originator) {
-      return await this.CWI.internalizeAction(args, originator);
-    }
-    async listOutputs(args, originator) {
-      return await this.CWI.listOutputs(args, originator);
-    }
-    async relinquishOutput(args, originator) {
-      return await this.CWI.relinquishOutput(args, originator);
-    }
-    async getPublicKey(args, originator) {
-      return await this.CWI.getPublicKey(args, originator);
-    }
-    async revealCounterpartyKeyLinkage(args, originator) {
-      return await this.CWI.revealCounterpartyKeyLinkage(args, originator);
-    }
-    async revealSpecificKeyLinkage(args, originator) {
-      return await this.CWI.revealSpecificKeyLinkage(args, originator);
-    }
-    async encrypt(args, originator) {
-      return await this.CWI.encrypt(args, originator);
-    }
-    async decrypt(args, originator) {
-      return await this.CWI.decrypt(args, originator);
-    }
-    async createHmac(args, originator) {
-      return await this.CWI.createHmac(args, originator);
-    }
-    async verifyHmac(args, originator) {
-      return await this.CWI.verifyHmac(args, originator);
-    }
-    async createSignature(args, originator) {
-      return await this.CWI.createSignature(args, originator);
-    }
-    async verifySignature(args, originator) {
-      return await this.CWI.verifySignature(args, originator);
-    }
-    async acquireCertificate(args, originator) {
-      return await this.CWI.acquireCertificate(args, originator);
-    }
-    async listCertificates(args, originator) {
-      return await this.CWI.listCertificates(args, originator);
-    }
-    async proveCertificate(args, originator) {
-      return await this.CWI.proveCertificate(args, originator);
-    }
-    async relinquishCertificate(args, originator) {
-      return await this.CWI.relinquishCertificate(args, originator);
-    }
-    async discoverByIdentityKey(args, originator) {
-      return await this.CWI.discoverByIdentityKey(args, originator);
-    }
-    async discoverByAttributes(args, originator) {
-      return await this.CWI.discoverByAttributes(args, originator);
-    }
-    async isAuthenticated(args, originator) {
-      return await this.CWI.isAuthenticated(args, originator);
-    }
-    async waitForAuthentication(args, originator) {
-      return await this.CWI.waitForAuthentication(args, originator);
-    }
-    async getHeight(args, originator) {
-      return await this.CWI.getHeight(args, originator);
-    }
-    async getHeaderForHeight(args, originator) {
-      return await this.CWI.getHeaderForHeight(args, originator);
-    }
-    async getNetwork(args, originator) {
-      return await this.CWI.getNetwork(args, originator);
-    }
-    async getVersion(args, originator) {
-      return await this.CWI.getVersion(args, originator);
-    }
-  };
-
-  // node_modules/@bsv/sdk/dist/esm/src/wallet/WalletError.js
-  var WalletError = class extends Error {
-    code;
-    isError = true;
-    constructor(message, code = 1, stack) {
-      super(message);
-      this.code = code;
-      this.name = this.constructor.name;
-      if (stack !== void 0 && stack !== null && stack !== "") {
-        this.stack = stack;
-      } else {
-        Error.captureStackTrace(this, this.constructor);
-      }
-    }
-    /**
-     * Safely serializes a WalletError (including special cases), Error or unknown error to JSON.
-     *
-     * Safely means avoiding deep, large, circular issues.
-     *
-     * Example deserialization can be found in HTTPWalletJSON.ts of bsv ts-sdk.
-     *
-     * @param error
-     * @returns stringified JSON representation of the error such that it can be deserialized to a WalletError.
-     */
-    static unknownToJson(error) {
-      let e;
-      if (error.isError === true && String(error.name).startsWith("WERR_")) {
-        e = {
-          name: error.name,
-          message: error.message,
-          isError: true
-        };
-        if (e.name === "WERR_REVIEW_ACTIONS") {
-          e.reviewActionResults = error.reviewActionResults;
-          e.sendWithResults = error.sendWithResults;
-          e.txid = error.txid;
-          e.tx = error.tx;
-          e.noSendChange = error.noSendChange;
-          e.code = 5;
-        } else if (e.name === "WERR_INVALID_PARAMETER") {
-          e.parameter = error.parameter;
-          e.code = 6;
-        } else if (e.name === "WERR_INSUFFICIENT_FUNDS") {
-          e.totalSatoshisNeeded = error.totalSatoshisNeeded;
-          e.moreSatoshisNeeded = error.moreSatoshisNeeded;
-          e.code = 7;
-        }
-      } else if (error instanceof Error) {
-        e = {
-          name: error.constructor.name,
-          message: error.message,
-          isError: true
-        };
-      } else {
-        e = {
-          name: "WERR_UNKNOWN",
-          message: String(error),
-          isError: true
-        };
-      }
-      const json = JSON.stringify(e);
-      return json;
-    }
-  };
-  var walletErrors;
-  (function(walletErrors2) {
-    walletErrors2[walletErrors2["unknownError"] = 1] = "unknownError";
-    walletErrors2[walletErrors2["unsupportedAction"] = 2] = "unsupportedAction";
-    walletErrors2[walletErrors2["invalidHmac"] = 3] = "invalidHmac";
-    walletErrors2[walletErrors2["invalidSignature"] = 4] = "invalidSignature";
-    walletErrors2[walletErrors2["reviewActions"] = 5] = "reviewActions";
-    walletErrors2[walletErrors2["invalidParameter"] = 6] = "invalidParameter";
-    walletErrors2[walletErrors2["insufficientFunds"] = 7] = "insufficientFunds";
-  })(walletErrors || (walletErrors = {}));
-
-  // node_modules/@bsv/sdk/dist/esm/src/wallet/substrates/InvokableWalletBase.js
-  var InvokableWalletBase = class {
-    async createAction(args) {
-      return await this.invoke("createAction", args);
-    }
-    async signAction(args) {
-      return await this.invoke("signAction", args);
-    }
-    async abortAction(args) {
-      return await this.invoke("abortAction", args);
-    }
-    async listActions(args) {
-      return await this.invoke("listActions", args);
-    }
-    async internalizeAction(args) {
-      return await this.invoke("internalizeAction", args);
-    }
-    async listOutputs(args) {
-      return await this.invoke("listOutputs", args);
-    }
-    async relinquishOutput(args) {
-      return await this.invoke("relinquishOutput", args);
-    }
-    async getPublicKey(args) {
-      return await this.invoke("getPublicKey", args);
-    }
-    async revealCounterpartyKeyLinkage(args) {
-      return await this.invoke("revealCounterpartyKeyLinkage", args);
-    }
-    async revealSpecificKeyLinkage(args) {
-      return await this.invoke("revealSpecificKeyLinkage", args);
-    }
-    async encrypt(args) {
-      return await this.invoke("encrypt", args);
-    }
-    async decrypt(args) {
-      return await this.invoke("decrypt", args);
-    }
-    async createHmac(args) {
-      return await this.invoke("createHmac", args);
-    }
-    async verifyHmac(args) {
-      return await this.invoke("verifyHmac", args);
-    }
-    async createSignature(args) {
-      return await this.invoke("createSignature", args);
-    }
-    async verifySignature(args) {
-      return await this.invoke("verifySignature", args);
-    }
-    async acquireCertificate(args) {
-      return await this.invoke("acquireCertificate", args);
-    }
-    async listCertificates(args) {
-      return await this.invoke("listCertificates", args);
-    }
-    async proveCertificate(args) {
-      return await this.invoke("proveCertificate", args);
-    }
-    async relinquishCertificate(args) {
-      return await this.invoke("relinquishCertificate", args);
-    }
-    async discoverByIdentityKey(args) {
-      return await this.invoke("discoverByIdentityKey", args);
-    }
-    async discoverByAttributes(args) {
-      return await this.invoke("discoverByAttributes", args);
-    }
-    async isAuthenticated(args) {
-      return await this.invoke("isAuthenticated", args);
-    }
-    async waitForAuthentication(args) {
-      return await this.invoke("waitForAuthentication", args);
-    }
-    async getHeight(args) {
-      return await this.invoke("getHeight", args);
-    }
-    async getHeaderForHeight(args) {
-      return await this.invoke("getHeaderForHeight", args);
-    }
-    async getNetwork(args) {
-      return await this.invoke("getNetwork", args);
-    }
-    async getVersion(args) {
-      return await this.invoke("getVersion", args);
-    }
-  };
-
-  // node_modules/@bsv/sdk/dist/esm/src/wallet/substrates/XDM.js
-  var XDMSubstrate = class extends InvokableWalletBase {
-    domain;
-    constructor(domain = "*") {
-      super();
-      if (typeof window !== "object") {
-        throw new Error("The XDM substrate requires a global window object.");
-      }
-      if (typeof window.postMessage !== "function") {
-        throw new Error("The window object does not seem to support postMessage calls.");
-      }
-      this.domain = domain;
-    }
-    async invoke(call, args) {
-      return await new Promise((resolve, reject) => {
-        const id = toBase64(Random_default(12));
-        const listener = (e) => {
-          if (e.data.type !== "CWI" || !e.isTrusted || e.data.id !== id || e.data.isInvocation === true) {
-            return;
-          }
-          if (typeof window.removeEventListener === "function") {
-            window.removeEventListener("message", listener);
-          }
-          if (e.data.status === "error") {
-            const err = new WalletError(e.data.description, e.data.code);
-            reject(err);
-          } else {
-            resolve(e.data.result);
-          }
-        };
-        window.addEventListener("message", listener);
-        window.parent.postMessage({
-          type: "CWI",
-          isInvocation: true,
-          id,
-          call,
-          args
-        }, this.domain);
-      });
-    }
-  };
-
-  // node_modules/@bsv/sdk/dist/esm/src/auth/certificates/Certificate.js
-  var Certificate = class _Certificate {
-    /**
-     * Type identifier for the certificate, base64 encoded string, 32 bytes.
-     */
-    type;
-    /**
-     * Unique serial number of the certificate, base64 encoded string, 32 bytes.
-     */
-    serialNumber;
-    /**
-     * The public key belonging to the certificate's subject, compressed public key hex string.
-     */
-    subject;
-    /**
-     * Public key of the certifier who issued the certificate, compressed public key hex string.
-     */
-    certifier;
-    /**
-     * The outpoint used to confirm that the certificate has not been revoked (TXID.OutputIndex), as a string.
-     */
-    revocationOutpoint;
-    /**
-     * All the fields present in the certificate, with field names as keys and encrypted field values as Base64 strings.
-     */
-    fields;
-    /**
-     * Certificate signature by the certifier's private key, DER encoded hex string.
-     */
-    signature;
-    /**
-     * Constructs a new Certificate.
-     *
-     * @param {Base64String} type - Type identifier for the certificate, base64 encoded string, 32 bytes.
-     * @param {Base64String} serialNumber - Unique serial number of the certificate, base64 encoded string, 32 bytes.
-     * @param {PubKeyHex} subject - The public key belonging to the certificate's subject, compressed public key hex string.
-     * @param {PubKeyHex} certifier - Public key of the certifier who issued the certificate, compressed public key hex string.
-     * @param {OutpointString} revocationOutpoint - The outpoint used to confirm that the certificate has not been revoked (TXID.OutputIndex), as a string.
-     * @param {Record<CertificateFieldNameUnder50Bytes, string>} fields - All the fields present in the certificate.
-     * @param {HexString} signature - Certificate signature by the certifier's private key, DER encoded hex string.
-     */
-    constructor(type, serialNumber, subject, certifier, revocationOutpoint, fields, signature) {
-      this.type = type;
-      this.serialNumber = serialNumber;
-      this.subject = subject;
-      this.certifier = certifier;
-      this.revocationOutpoint = revocationOutpoint;
-      this.fields = fields;
-      this.signature = signature;
-    }
-    /**
-     * Serializes the certificate into binary format, with or without a signature.
-     *
-     * @param {boolean} [includeSignature=true] - Whether to include the signature in the serialization.
-     * @returns {number[]} - The serialized certificate in binary format.
-     */
-    toBinary(includeSignature = true) {
-      const writer = new Writer();
-      const typeBytes = toArray2(this.type, "base64");
-      writer.write(typeBytes);
-      const serialNumberBytes = toArray2(this.serialNumber, "base64");
-      writer.write(serialNumberBytes);
-      const subjectBytes = toArray2(this.subject, "hex");
-      writer.write(subjectBytes);
-      const certifierBytes = toArray2(this.certifier, "hex");
-      writer.write(certifierBytes);
-      const [txid, outputIndex] = this.revocationOutpoint.split(".");
-      const txidBytes = toArray2(txid, "hex");
-      writer.write(txidBytes);
-      writer.writeVarIntNum(Number(outputIndex));
-      const fieldNames = Object.keys(this.fields).sort((a, b) => a.localeCompare(b));
-      writer.writeVarIntNum(fieldNames.length);
-      for (const fieldName of fieldNames) {
-        const fieldValue = this.fields[fieldName];
-        const fieldNameBytes = toArray2(fieldName, "utf8");
-        writer.writeVarIntNum(fieldNameBytes.length);
-        writer.write(fieldNameBytes);
-        const fieldValueBytes = toArray2(fieldValue, "utf8");
-        writer.writeVarIntNum(fieldValueBytes.length);
-        writer.write(fieldValueBytes);
-      }
-      if (includeSignature && (this.signature ?? "").length > 0) {
-        const signatureBytes = toArray2(this.signature, "hex");
-        writer.write(signatureBytes);
-      }
-      return writer.toArray();
-    }
-    /**
-     * Deserializes a certificate from binary format.
-     *
-     * @param {number[]} bin - The binary data representing the certificate.
-     * @returns {Certificate} - The deserialized Certificate object.
-     */
-    static fromBinary(bin) {
-      const reader = new Reader(bin);
-      const typeBytes = reader.read(32);
-      const type = toBase64(typeBytes);
-      const serialNumberBytes = reader.read(32);
-      const serialNumber = toBase64(serialNumberBytes);
-      const subjectBytes = reader.read(33);
-      const subject = toHex(subjectBytes);
-      const certifierBytes = reader.read(33);
-      const certifier = toHex(certifierBytes);
-      const txidBytes = reader.read(32);
-      const txid = toHex(txidBytes);
-      const outputIndex = reader.readVarIntNum();
-      const revocationOutpoint = `${txid}.${outputIndex}`;
-      const numFields = reader.readVarIntNum();
-      const fields = {};
-      for (let i = 0; i < numFields; i++) {
-        const fieldNameLength = reader.readVarIntNum();
-        const fieldNameBytes = reader.read(fieldNameLength);
-        const fieldName = toUTF8(fieldNameBytes);
-        const fieldValueLength = reader.readVarIntNum();
-        const fieldValueBytes = reader.read(fieldValueLength);
-        const fieldValue = toUTF8(fieldValueBytes);
-        fields[fieldName] = fieldValue;
-      }
-      let signature;
-      if (!reader.eof()) {
-        const signatureBytes = reader.read();
-        const sig = Signature.fromDER(signatureBytes);
-        signature = sig.toString("hex");
-      }
-      return new _Certificate(type, serialNumber, subject, certifier, revocationOutpoint, fields, signature);
-    }
-    /**
-     * Verifies the certificate's signature.
-     *
-     * @returns {Promise<boolean>} - A promise that resolves to true if the signature is valid.
-     */
-    async verify() {
-      const verifier = new ProtoWallet_default("anyone");
-      const verificationData = this.toBinary(false);
-      const signatureHex = this.signature ?? "";
-      const { valid } = await verifier.verifySignature({
-        signature: toArray2(signatureHex, "hex"),
-        // Now it is always a string
-        data: verificationData,
-        protocolID: [2, "certificate signature"],
-        keyID: `${this.type} ${this.serialNumber}`,
-        counterparty: this.certifier
-        // The certifier is the one who signed the certificate
-      });
-      return valid;
-    }
-    /**
-    * Signs the certificate using the provided certifier wallet.
-    *
-    * @param {Wallet} certifierWallet - The wallet representing the certifier.
-    * @returns {Promise<void>}
-    */
-    async sign(certifierWallet) {
-      if (this.signature != null && this.signature.length > 0) {
-        throw new Error(`Certificate has already been signed! Signature present: ${this.signature}`);
-      }
-      this.certifier = (await certifierWallet.getPublicKey({ identityKey: true })).publicKey;
-      const preimage = this.toBinary(false);
-      const { signature } = await certifierWallet.createSignature({
-        data: preimage,
-        protocolID: [2, "certificate signature"],
-        keyID: `${this.type} ${this.serialNumber}`
-      });
-      this.signature = toHex(signature);
-    }
-    /**
-     * Helper function which retrieves the protocol ID and key ID for certificate field encryption.
-     *
-     * For master certificate creation, no serial number is provided because entropy is required
-     * from both the client and the certifier. In this case, the `keyID` is simply the `fieldName`.
-     *
-     * For VerifiableCertificates verifier keyring creation, both the serial number and field name are available,
-     * so the `keyID` is formed by concatenating the `serialNumber` and `fieldName`.
-     *
-     * @param fieldName - The name of the field within the certificate to be encrypted.
-     * @param serialNumber - (Optional) The serial number of the certificate.
-     * @returns An object containing:
-     *   - `protocolID` (WalletProtocol): The protocol ID for certificate field encryption.
-     *   - `keyID` (string): A unique key identifier. It is the `fieldName` if `serialNumber` is undefined,
-     *     otherwise it is a combination of `serialNumber` and `fieldName`.
-     */
-    static getCertificateFieldEncryptionDetails(fieldName, serialNumber) {
-      return {
-        protocolID: [2, "certificate field encryption"],
-        keyID: serialNumber ? `${serialNumber} ${fieldName}` : fieldName
-      };
-    }
-    /**
-     * Creates a Certificate instance from a plain object representation.
-     *
-     * @param obj - The object containing certificate data.
-     * @returns A new Certificate instance.
-     */
-    static fromObject(obj) {
-      const cert = new _Certificate(obj.type, obj.serialNumber, obj.subject, obj.certifier, obj.revocationOutpoint, obj.fields, obj.signature);
-      return cert;
-    }
-  };
-
-  // node_modules/@bsv/sdk/dist/esm/src/wallet/substrates/WalletWireCalls.js
-  var calls;
-  (function(calls2) {
-    calls2[calls2["createAction"] = 1] = "createAction";
-    calls2[calls2["signAction"] = 2] = "signAction";
-    calls2[calls2["abortAction"] = 3] = "abortAction";
-    calls2[calls2["listActions"] = 4] = "listActions";
-    calls2[calls2["internalizeAction"] = 5] = "internalizeAction";
-    calls2[calls2["listOutputs"] = 6] = "listOutputs";
-    calls2[calls2["relinquishOutput"] = 7] = "relinquishOutput";
-    calls2[calls2["getPublicKey"] = 8] = "getPublicKey";
-    calls2[calls2["revealCounterpartyKeyLinkage"] = 9] = "revealCounterpartyKeyLinkage";
-    calls2[calls2["revealSpecificKeyLinkage"] = 10] = "revealSpecificKeyLinkage";
-    calls2[calls2["encrypt"] = 11] = "encrypt";
-    calls2[calls2["decrypt"] = 12] = "decrypt";
-    calls2[calls2["createHmac"] = 13] = "createHmac";
-    calls2[calls2["verifyHmac"] = 14] = "verifyHmac";
-    calls2[calls2["createSignature"] = 15] = "createSignature";
-    calls2[calls2["verifySignature"] = 16] = "verifySignature";
-    calls2[calls2["acquireCertificate"] = 17] = "acquireCertificate";
-    calls2[calls2["listCertificates"] = 18] = "listCertificates";
-    calls2[calls2["proveCertificate"] = 19] = "proveCertificate";
-    calls2[calls2["relinquishCertificate"] = 20] = "relinquishCertificate";
-    calls2[calls2["discoverByIdentityKey"] = 21] = "discoverByIdentityKey";
-    calls2[calls2["discoverByAttributes"] = 22] = "discoverByAttributes";
-    calls2[calls2["isAuthenticated"] = 23] = "isAuthenticated";
-    calls2[calls2["waitForAuthentication"] = 24] = "waitForAuthentication";
-    calls2[calls2["getHeight"] = 25] = "getHeight";
-    calls2[calls2["getHeaderForHeight"] = 26] = "getHeaderForHeight";
-    calls2[calls2["getNetwork"] = 27] = "getNetwork";
-    calls2[calls2["getVersion"] = 28] = "getVersion";
-  })(calls || (calls = {}));
-  var WalletWireCalls_default = calls;
-
-  // node_modules/@bsv/sdk/dist/esm/src/wallet/substrates/WalletWireTransceiver.js
-  var WalletWireTransceiver = class {
-    wire;
-    constructor(wire) {
-      this.wire = wire;
-    }
-    async transmit(call, originator = "", params = []) {
-      const frameWriter = new Writer();
-      frameWriter.writeUInt8(WalletWireCalls_default[call]);
-      const originatorArray = toArray2(originator, "utf8");
-      frameWriter.writeUInt8(originatorArray.length);
-      frameWriter.write(originatorArray);
-      if (params.length > 0) {
-        frameWriter.write(params);
-      }
-      const frame = frameWriter.toArray();
-      const result = await this.wire.transmitToWallet(frame);
-      const resultReader = new Reader(result);
-      const errorByte = resultReader.readUInt8();
-      if (errorByte === 0) {
-        const resultFrame = resultReader.read();
-        return resultFrame;
-      } else {
-        const errorMessageLength = resultReader.readVarIntNum();
-        const errorMessageBytes = resultReader.read(errorMessageLength);
-        const errorMessage = toUTF8(errorMessageBytes);
-        const stackTraceLength = resultReader.readVarIntNum();
-        const stackTraceBytes = resultReader.read(stackTraceLength);
-        const stackTrace = toUTF8(stackTraceBytes);
-        const e = new WalletError(errorMessage, errorByte, stackTrace);
-        throw e;
-      }
-    }
-    async createAction(args, originator) {
-      const paramWriter = new Writer();
-      const descriptionBytes = toArray2(args.description, "utf8");
-      paramWriter.writeVarIntNum(descriptionBytes.length);
-      paramWriter.write(descriptionBytes);
-      if (args.inputBEEF != null) {
-        paramWriter.writeVarIntNum(args.inputBEEF.length);
-        paramWriter.write(args.inputBEEF);
-      } else {
-        paramWriter.writeVarIntNum(-1);
-      }
-      if (args.inputs != null) {
-        paramWriter.writeVarIntNum(args.inputs.length);
-        for (const input of args.inputs) {
-          paramWriter.write(this.encodeOutpoint(input.outpoint));
-          if (input.unlockingScript != null && input.unlockingScript !== "") {
-            const unlockingScriptBytes = toArray2(input.unlockingScript, "hex");
-            paramWriter.writeVarIntNum(unlockingScriptBytes.length);
-            paramWriter.write(unlockingScriptBytes);
-          } else {
-            paramWriter.writeVarIntNum(-1);
-            paramWriter.writeVarIntNum(input.unlockingScriptLength ?? 0);
-          }
-          const inputDescriptionBytes = toArray2(input.inputDescription, "utf8");
-          paramWriter.writeVarIntNum(inputDescriptionBytes.length);
-          paramWriter.write(inputDescriptionBytes);
-          if (typeof input.sequenceNumber === "number") {
-            paramWriter.writeVarIntNum(input.sequenceNumber);
-          } else {
-            paramWriter.writeVarIntNum(-1);
-          }
-        }
-      } else {
-        paramWriter.writeVarIntNum(-1);
-      }
-      if (args.outputs != null) {
-        paramWriter.writeVarIntNum(args.outputs.length);
-        for (const output of args.outputs) {
-          const lockingScriptBytes = toArray2(output.lockingScript, "hex");
-          paramWriter.writeVarIntNum(lockingScriptBytes.length);
-          paramWriter.write(lockingScriptBytes);
-          paramWriter.writeVarIntNum(output.satoshis);
-          const outputDescriptionBytes = toArray2(output.outputDescription, "utf8");
-          paramWriter.writeVarIntNum(outputDescriptionBytes.length);
-          paramWriter.write(outputDescriptionBytes);
-          if (output.basket != null && output.basket !== "") {
-            const basketBytes = toArray2(output.basket, "utf8");
-            paramWriter.writeVarIntNum(basketBytes.length);
-            paramWriter.write(basketBytes);
-          } else {
-            paramWriter.writeVarIntNum(-1);
-          }
-          if (output.customInstructions != null && output.customInstructions !== "") {
-            const customInstructionsBytes = toArray2(output.customInstructions, "utf8");
-            paramWriter.writeVarIntNum(customInstructionsBytes.length);
-            paramWriter.write(customInstructionsBytes);
-          } else {
-            paramWriter.writeVarIntNum(-1);
-          }
-          if (output.tags != null) {
-            paramWriter.writeVarIntNum(output.tags.length);
-            for (const tag of output.tags) {
-              const tagBytes = toArray2(tag, "utf8");
-              paramWriter.writeVarIntNum(tagBytes.length);
-              paramWriter.write(tagBytes);
-            }
-          } else {
-            paramWriter.writeVarIntNum(-1);
-          }
-        }
-      } else {
-        paramWriter.writeVarIntNum(-1);
-      }
-      if (typeof args.lockTime === "number") {
-        paramWriter.writeVarIntNum(args.lockTime);
-      } else {
-        paramWriter.writeVarIntNum(-1);
-      }
-      if (typeof args.version === "number") {
-        paramWriter.writeVarIntNum(args.version);
-      } else {
-        paramWriter.writeVarIntNum(-1);
-      }
-      if (args.labels != null) {
-        paramWriter.writeVarIntNum(args.labels.length);
-        for (const label of args.labels) {
-          const labelBytes = toArray2(label, "utf8");
-          paramWriter.writeVarIntNum(labelBytes.length);
-          paramWriter.write(labelBytes);
-        }
-      } else {
-        paramWriter.writeVarIntNum(-1);
-      }
-      if (args.options != null) {
-        paramWriter.writeInt8(1);
-        if (typeof args.options.signAndProcess === "boolean") {
-          paramWriter.writeInt8(args.options.signAndProcess ? 1 : 0);
-        } else {
-          paramWriter.writeInt8(-1);
-        }
-        if (typeof args.options.acceptDelayedBroadcast === "boolean") {
-          paramWriter.writeInt8(args.options.acceptDelayedBroadcast ? 1 : 0);
-        } else {
-          paramWriter.writeInt8(-1);
-        }
-        if (args.options.trustSelf === "known") {
-          paramWriter.writeInt8(1);
-        } else {
-          paramWriter.writeInt8(-1);
-        }
-        if (args.options.knownTxids != null) {
-          paramWriter.writeVarIntNum(args.options.knownTxids.length);
-          for (const txid of args.options.knownTxids) {
-            const txidBytes = toArray2(txid, "hex");
-            paramWriter.write(txidBytes);
-          }
-        } else {
-          paramWriter.writeVarIntNum(-1);
-        }
-        if (typeof args.options.returnTXIDOnly === "boolean") {
-          paramWriter.writeInt8(args.options.returnTXIDOnly ? 1 : 0);
-        } else {
-          paramWriter.writeInt8(-1);
-        }
-        if (typeof args.options.noSend === "boolean") {
-          paramWriter.writeInt8(args.options.noSend ? 1 : 0);
-        } else {
-          paramWriter.writeInt8(-1);
-        }
-        if (args.options.noSendChange != null) {
-          paramWriter.writeVarIntNum(args.options.noSendChange.length);
-          for (const outpoint of args.options.noSendChange) {
-            paramWriter.write(this.encodeOutpoint(outpoint));
-          }
-        } else {
-          paramWriter.writeVarIntNum(-1);
-        }
-        if (args.options.sendWith != null) {
-          paramWriter.writeVarIntNum(args.options.sendWith.length);
-          for (const txid of args.options.sendWith) {
-            const txidBytes = toArray2(txid, "hex");
-            paramWriter.write(txidBytes);
-          }
-        } else {
-          paramWriter.writeVarIntNum(-1);
-        }
-        if (typeof args.options.randomizeOutputs === "boolean") {
-          paramWriter.writeInt8(args.options.randomizeOutputs ? 1 : 0);
-        } else {
-          paramWriter.writeInt8(-1);
-        }
-      } else {
-        paramWriter.writeInt8(0);
-      }
-      const result = await this.transmit("createAction", originator, paramWriter.toArray());
-      const resultReader = new Reader(result);
-      const response = {};
-      const txidFlag = resultReader.readInt8();
-      if (txidFlag === 1) {
-        const txidBytes = resultReader.read(32);
-        response.txid = toHex(txidBytes);
-      }
-      const txFlag = resultReader.readInt8();
-      if (txFlag === 1) {
-        const txLength = resultReader.readVarIntNum();
-        response.tx = resultReader.read(txLength);
-      }
-      const noSendChangeLength = resultReader.readVarIntNum();
-      if (noSendChangeLength >= 0) {
-        response.noSendChange = [];
-        for (let i = 0; i < noSendChangeLength; i++) {
-          const outpoint = this.readOutpoint(resultReader);
-          response.noSendChange.push(outpoint);
-        }
-      }
-      const sendWithResultsLength = resultReader.readVarIntNum();
-      if (sendWithResultsLength >= 0) {
-        response.sendWithResults = [];
-        for (let i = 0; i < sendWithResultsLength; i++) {
-          const txidBytes = resultReader.read(32);
-          const txid = toHex(txidBytes);
-          const statusCode = resultReader.readInt8();
-          let status = "unproven";
-          if (statusCode === 1)
-            status = "unproven";
-          else if (statusCode === 2)
-            status = "sending";
-          else if (statusCode === 3)
-            status = "failed";
-          response.sendWithResults.push({ txid, status });
-        }
-      }
-      const signableTransactionFlag = resultReader.readInt8();
-      if (signableTransactionFlag === 1) {
-        const txLength = resultReader.readVarIntNum();
-        const tx = resultReader.read(txLength);
-        const referenceLength = resultReader.readVarIntNum();
-        const referenceBytes = resultReader.read(referenceLength);
-        response.signableTransaction = {
-          tx,
-          reference: toBase64(referenceBytes)
-        };
-      }
-      return response;
-    }
-    async signAction(args, originator) {
-      const paramWriter = new Writer();
-      const spendIndexes = Object.keys(args.spends);
-      paramWriter.writeVarIntNum(spendIndexes.length);
-      for (const index of spendIndexes) {
-        paramWriter.writeVarIntNum(Number(index));
-        const spend = args.spends[Number(index)];
-        const unlockingScriptBytes = toArray2(spend.unlockingScript, "hex");
-        paramWriter.writeVarIntNum(unlockingScriptBytes.length);
-        paramWriter.write(unlockingScriptBytes);
-        if (typeof spend.sequenceNumber === "number") {
-          paramWriter.writeVarIntNum(spend.sequenceNumber);
-        } else {
-          paramWriter.writeVarIntNum(-1);
-        }
-      }
-      const referenceBytes = toArray2(args.reference, "base64");
-      paramWriter.writeVarIntNum(referenceBytes.length);
-      paramWriter.write(referenceBytes);
-      if (args.options != null) {
-        paramWriter.writeInt8(1);
-        if (typeof args.options.acceptDelayedBroadcast === "boolean") {
-          paramWriter.writeInt8(args.options.acceptDelayedBroadcast ? 1 : 0);
-        } else {
-          paramWriter.writeInt8(-1);
-        }
-        if (typeof args.options.returnTXIDOnly === "boolean") {
-          paramWriter.writeInt8(args.options.returnTXIDOnly ? 1 : 0);
-        } else {
-          paramWriter.writeInt8(-1);
-        }
-        if (typeof args.options.noSend === "boolean") {
-          paramWriter.writeInt8(args.options.noSend ? 1 : 0);
-        } else {
-          paramWriter.writeInt8(-1);
-        }
-        if (args.options.sendWith != null) {
-          paramWriter.writeVarIntNum(args.options.sendWith.length);
-          for (const txid of args.options.sendWith) {
-            const txidBytes = toArray2(txid, "hex");
-            paramWriter.write(txidBytes);
-          }
-        } else {
-          paramWriter.writeVarIntNum(-1);
-        }
-      } else {
-        paramWriter.writeInt8(0);
-      }
-      const result = await this.transmit("signAction", originator, paramWriter.toArray());
-      const resultReader = new Reader(result);
-      const response = {};
-      const txidFlag = resultReader.readInt8();
-      if (txidFlag === 1) {
-        const txidBytes = resultReader.read(32);
-        response.txid = toHex(txidBytes);
-      }
-      const txFlag = resultReader.readInt8();
-      if (txFlag === 1) {
-        const txLength = resultReader.readVarIntNum();
-        response.tx = resultReader.read(txLength);
-      }
-      const sendWithResultsLength = resultReader.readVarIntNum();
-      if (sendWithResultsLength >= 0) {
-        response.sendWithResults = [];
-        for (let i = 0; i < sendWithResultsLength; i++) {
-          const txidBytes = resultReader.read(32);
-          const txid = toHex(txidBytes);
-          const statusCode = resultReader.readInt8();
-          let status = "unproven";
-          if (statusCode === 1)
-            status = "unproven";
-          else if (statusCode === 2)
-            status = "sending";
-          else if (statusCode === 3)
-            status = "failed";
-          response.sendWithResults.push({ txid, status });
-        }
-      }
-      return response;
-    }
-    async abortAction(args, originator) {
-      await this.transmit("abortAction", originator, toArray2(args.reference, "base64"));
-      return { aborted: true };
-    }
-    async listActions(args, originator) {
-      const paramWriter = new Writer();
-      paramWriter.writeVarIntNum(args.labels.length);
-      for (const label of args.labels) {
-        const labelBytes = toArray2(label, "utf8");
-        paramWriter.writeVarIntNum(labelBytes.length);
-        paramWriter.write(labelBytes);
-      }
-      if (args.labelQueryMode === "any") {
-        paramWriter.writeInt8(1);
-      } else if (args.labelQueryMode === "all") {
-        paramWriter.writeInt8(2);
-      } else {
-        paramWriter.writeInt8(-1);
-      }
-      const includeOptions = [
-        args.includeLabels,
-        args.includeInputs,
-        args.includeInputSourceLockingScripts,
-        args.includeInputUnlockingScripts,
-        args.includeOutputs,
-        args.includeOutputLockingScripts
-      ];
-      for (const option of includeOptions) {
-        if (typeof option === "boolean") {
-          paramWriter.writeInt8(option ? 1 : 0);
-        } else {
-          paramWriter.writeInt8(-1);
-        }
-      }
-      if (typeof args.limit === "number") {
-        paramWriter.writeVarIntNum(args.limit);
-      } else {
-        paramWriter.writeVarIntNum(-1);
-      }
-      if (typeof args.offset === "number") {
-        paramWriter.writeVarIntNum(args.offset);
-      } else {
-        paramWriter.writeVarIntNum(-1);
-      }
-      paramWriter.writeInt8(typeof args.seekPermission === "boolean" ? args.seekPermission ? 1 : 0 : -1);
-      const result = await this.transmit("listActions", originator, paramWriter.toArray());
-      const resultReader = new Reader(result);
-      const totalActions = resultReader.readVarIntNum();
-      const actions = [];
-      for (let i = 0; i < totalActions; i++) {
-        const txidBytes = resultReader.read(32);
-        const txid = toHex(txidBytes);
-        const satoshis = resultReader.readVarIntNum();
-        const statusCode = resultReader.readInt8();
-        let status;
-        switch (statusCode) {
-          case 1:
-            status = "completed";
-            break;
-          case 2:
-            status = "unprocessed";
-            break;
-          case 3:
-            status = "sending";
-            break;
-          case 4:
-            status = "unproven";
-            break;
-          case 5:
-            status = "unsigned";
-            break;
-          case 6:
-            status = "nosend";
-            break;
-          case 7:
-            status = "nonfinal";
-            break;
-          case 8:
-            status = "failed";
-            break;
-          default:
-            throw new Error(`Unknown status code: ${statusCode}`);
-        }
-        const isOutgoing = resultReader.readInt8() === 1;
-        const descriptionLength = resultReader.readVarIntNum();
-        const descriptionBytes = resultReader.read(descriptionLength);
-        const description = toUTF8(descriptionBytes);
-        const action = {
-          txid,
-          satoshis,
-          status,
-          isOutgoing,
-          description,
-          version: 0,
-          lockTime: 0
-        };
-        const labelsLength = resultReader.readVarIntNum();
-        if (labelsLength >= 0) {
-          action.labels = [];
-          for (let j = 0; j < labelsLength; j++) {
-            const labelLength = resultReader.readVarIntNum();
-            const labelBytes = resultReader.read(labelLength);
-            action.labels.push(toUTF8(labelBytes));
-          }
-        }
-        action.version = resultReader.readVarIntNum();
-        action.lockTime = resultReader.readVarIntNum();
-        const inputsLength = resultReader.readVarIntNum();
-        if (inputsLength >= 0) {
-          action.inputs = [];
-          for (let k = 0; k < inputsLength; k++) {
-            const sourceOutpoint = this.readOutpoint(resultReader);
-            const sourceSatoshis = resultReader.readVarIntNum();
-            const sourceLockingScriptLength = resultReader.readVarIntNum();
-            let sourceLockingScript;
-            if (sourceLockingScriptLength >= 0) {
-              const sourceLockingScriptBytes = resultReader.read(sourceLockingScriptLength);
-              sourceLockingScript = toHex(sourceLockingScriptBytes);
-            }
-            const unlockingScriptLength = resultReader.readVarIntNum();
-            let unlockingScript;
-            if (unlockingScriptLength >= 0) {
-              const unlockingScriptBytes = resultReader.read(unlockingScriptLength);
-              unlockingScript = toHex(unlockingScriptBytes);
-            }
-            const inputDescriptionLength = resultReader.readVarIntNum();
-            const inputDescriptionBytes = resultReader.read(inputDescriptionLength);
-            const inputDescription = toUTF8(inputDescriptionBytes);
-            const sequenceNumber = resultReader.readVarIntNum();
-            action.inputs.push({
-              sourceOutpoint,
-              sourceSatoshis,
-              sourceLockingScript,
-              unlockingScript,
-              inputDescription,
-              sequenceNumber
-            });
-          }
-        }
-        const outputsLength = resultReader.readVarIntNum();
-        if (outputsLength >= 0) {
-          action.outputs = [];
-          for (let l = 0; l < outputsLength; l++) {
-            const outputIndex = resultReader.readVarIntNum();
-            const satoshis2 = resultReader.readVarIntNum();
-            const lockingScriptLength = resultReader.readVarIntNum();
-            let lockingScript;
-            if (lockingScriptLength >= 0) {
-              const lockingScriptBytes = resultReader.read(lockingScriptLength);
-              lockingScript = toHex(lockingScriptBytes);
-            }
-            const spendable = resultReader.readInt8() === 1;
-            const outputDescriptionLength = resultReader.readVarIntNum();
-            const outputDescriptionBytes = resultReader.read(outputDescriptionLength);
-            const outputDescription = toUTF8(outputDescriptionBytes);
-            const basketLength = resultReader.readVarIntNum();
-            let basket;
-            if (basketLength >= 0) {
-              const basketBytes = resultReader.read(basketLength);
-              basket = toUTF8(basketBytes);
-            }
-            const tagsLength = resultReader.readVarIntNum();
-            const tags = [];
-            if (tagsLength >= 0) {
-              for (let m = 0; m < tagsLength; m++) {
-                const tagLength = resultReader.readVarIntNum();
-                const tagBytes = resultReader.read(tagLength);
-                tags.push(toUTF8(tagBytes));
-              }
-            }
-            const customInstructionsLength = resultReader.readVarIntNum();
-            let customInstructions;
-            if (customInstructionsLength >= 0) {
-              const customInstructionsBytes = resultReader.read(customInstructionsLength);
-              customInstructions = toUTF8(customInstructionsBytes);
-            }
-            action.outputs.push({
-              outputIndex,
-              satoshis: satoshis2,
-              lockingScript,
-              spendable,
-              outputDescription,
-              basket,
-              tags,
-              customInstructions
-            });
-          }
-        }
-        actions.push(action);
-      }
-      return {
-        totalActions,
-        actions
-      };
-    }
-    async internalizeAction(args, originator) {
-      const paramWriter = new Writer();
-      paramWriter.writeVarIntNum(args.tx.length);
-      paramWriter.write(args.tx);
-      paramWriter.writeVarIntNum(args.outputs.length);
-      for (const out of args.outputs) {
-        paramWriter.writeVarIntNum(out.outputIndex);
-        if (out.protocol === "wallet payment") {
-          if (out.paymentRemittance == null) {
-            throw new Error("Payment remittance is required for wallet payment");
-          }
-          paramWriter.writeUInt8(1);
-          paramWriter.write(toArray2(out.paymentRemittance.senderIdentityKey, "hex"));
-          const derivationPrefixAsArray = toArray2(out.paymentRemittance.derivationPrefix, "base64");
-          paramWriter.writeVarIntNum(derivationPrefixAsArray.length);
-          paramWriter.write(derivationPrefixAsArray);
-          const derivationSuffixAsArray = toArray2(out.paymentRemittance.derivationSuffix, "base64");
-          paramWriter.writeVarIntNum(derivationSuffixAsArray.length);
-          paramWriter.write(derivationSuffixAsArray);
-        } else {
-          paramWriter.writeUInt8(2);
-          const basketAsArray = toArray2(out.insertionRemittance?.basket, "utf8");
-          paramWriter.writeVarIntNum(basketAsArray.length);
-          paramWriter.write(basketAsArray);
-          if (typeof out.insertionRemittance?.customInstructions === "string" && out.insertionRemittance.customInstructions !== "") {
-            const customInstructionsAsArray = toArray2(out.insertionRemittance.customInstructions, "utf8");
-            paramWriter.writeVarIntNum(customInstructionsAsArray.length);
-            paramWriter.write(customInstructionsAsArray);
-          } else {
-            paramWriter.writeVarIntNum(-1);
-          }
-          if (typeof out.insertionRemittance?.tags === "object") {
-            paramWriter.writeVarIntNum(out.insertionRemittance.tags.length);
-            for (const tag of out.insertionRemittance.tags) {
-              const tagAsArray = toArray2(tag, "utf8");
-              paramWriter.writeVarIntNum(tagAsArray.length);
-              paramWriter.write(tagAsArray);
-            }
-          } else {
-            paramWriter.writeVarIntNum(0);
-          }
-        }
-      }
-      if (typeof args.labels === "object") {
-        paramWriter.writeVarIntNum(args.labels.length);
-        for (const l of args.labels) {
-          const labelAsArray = toArray2(l, "utf8");
-          paramWriter.writeVarIntNum(labelAsArray.length);
-          paramWriter.write(labelAsArray);
-        }
-      } else {
-        paramWriter.writeVarIntNum(-1);
-      }
-      const descriptionAsArray = toArray2(args.description);
-      paramWriter.writeVarIntNum(descriptionAsArray.length);
-      paramWriter.write(descriptionAsArray);
-      paramWriter.writeInt8(typeof args.seekPermission === "boolean" ? args.seekPermission ? 1 : 0 : -1);
-      await this.transmit("internalizeAction", originator, paramWriter.toArray());
-      return { accepted: true };
-    }
-    async listOutputs(args, originator) {
-      const paramWriter = new Writer();
-      const basketAsArray = toArray2(args.basket, "utf8");
-      paramWriter.writeVarIntNum(basketAsArray.length);
-      paramWriter.write(basketAsArray);
-      if (typeof args.tags === "object") {
-        paramWriter.writeVarIntNum(args.tags.length);
-        for (const tag of args.tags) {
-          const tagAsArray = toArray2(tag, "utf8");
-          paramWriter.writeVarIntNum(tagAsArray.length);
-          paramWriter.write(tagAsArray);
-        }
-      } else {
-        paramWriter.writeVarIntNum(0);
-      }
-      if (args.tagQueryMode === "all") {
-        paramWriter.writeInt8(1);
-      } else if (args.tagQueryMode === "any") {
-        paramWriter.writeInt8(2);
-      } else {
-        paramWriter.writeInt8(-1);
-      }
-      if (args.include === "locking scripts") {
-        paramWriter.writeInt8(1);
-      } else if (args.include === "entire transactions") {
-        paramWriter.writeInt8(2);
-      } else {
-        paramWriter.writeInt8(-1);
-      }
-      if (typeof args.includeCustomInstructions === "boolean") {
-        paramWriter.writeInt8(args.includeCustomInstructions ? 1 : 0);
-      } else {
-        paramWriter.writeInt8(-1);
-      }
-      if (typeof args.includeTags === "boolean") {
-        paramWriter.writeInt8(args.includeTags ? 1 : 0);
-      } else {
-        paramWriter.writeInt8(-1);
-      }
-      if (typeof args.includeLabels === "boolean") {
-        paramWriter.writeInt8(args.includeLabels ? 1 : 0);
-      } else {
-        paramWriter.writeInt8(-1);
-      }
-      if (typeof args.limit === "number") {
-        paramWriter.writeVarIntNum(args.limit);
-      } else {
-        paramWriter.writeVarIntNum(-1);
-      }
-      if (typeof args.offset === "number") {
-        paramWriter.writeVarIntNum(args.offset);
-      } else {
-        paramWriter.writeVarIntNum(-1);
-      }
-      paramWriter.writeInt8(typeof args.seekPermission === "boolean" ? args.seekPermission ? 1 : 0 : -1);
-      const result = await this.transmit("listOutputs", originator, paramWriter.toArray());
-      const resultReader = new Reader(result);
-      const totalOutputs = resultReader.readVarIntNum();
-      const beefLength = resultReader.readVarIntNum();
-      let BEEF;
-      if (beefLength >= 0) {
-        BEEF = resultReader.read(beefLength);
-      }
-      const outputs = [];
-      for (let i = 0; i < totalOutputs; i++) {
-        const outpoint = this.readOutpoint(resultReader);
-        const satoshis = resultReader.readVarIntNum();
-        const output = {
-          spendable: true,
-          outpoint,
-          satoshis
-        };
-        const scriptLength = resultReader.readVarIntNum();
-        if (scriptLength >= 0) {
-          output.lockingScript = toHex(resultReader.read(scriptLength));
-        }
-        const customInstructionsLength = resultReader.readVarIntNum();
-        if (customInstructionsLength >= 0) {
-          output.customInstructions = toUTF8(resultReader.read(customInstructionsLength));
-        }
-        const tagsLength = resultReader.readVarIntNum();
-        if (tagsLength !== -1) {
-          const tags = [];
-          for (let i2 = 0; i2 < tagsLength; i2++) {
-            const tagLength = resultReader.readVarIntNum();
-            tags.push(toUTF8(resultReader.read(tagLength)));
-          }
-          output.tags = tags;
-        }
-        const labelsLength = resultReader.readVarIntNum();
-        if (labelsLength !== -1) {
-          const labels = [];
-          for (let i2 = 0; i2 < labelsLength; i2++) {
-            const labelLength = resultReader.readVarIntNum();
-            labels.push(toUTF8(resultReader.read(labelLength)));
-          }
-          output.labels = labels;
-        }
-        outputs.push(output);
-      }
-      return {
-        totalOutputs,
-        BEEF,
-        outputs
-      };
-    }
-    async relinquishOutput(args, originator) {
-      const paramWriter = new Writer();
-      const basketAsArray = toArray2(args.basket, "utf8");
-      paramWriter.writeVarIntNum(basketAsArray.length);
-      paramWriter.write(basketAsArray);
-      paramWriter.write(this.encodeOutpoint(args.output));
-      await this.transmit("relinquishOutput", originator, paramWriter.toArray());
-      return { relinquished: true };
-    }
-    encodeOutpoint(outpoint) {
-      const writer = new Writer();
-      const [txid, index] = outpoint.split(".");
-      writer.write(toArray2(txid, "hex"));
-      writer.writeVarIntNum(Number(index));
-      return writer.toArray();
-    }
-    readOutpoint(reader) {
-      const txid = toHex(reader.read(32));
-      const index = reader.readVarIntNum();
-      return `${txid}.${index}`;
-    }
-    async getPublicKey(args, originator) {
-      const paramWriter = new Writer();
-      paramWriter.writeUInt8(args.identityKey ? 1 : 0);
-      if (!args.identityKey) {
-        paramWriter.write(this.encodeKeyRelatedParams(args.protocolID ??= [SecurityLevels.Silent, "default"], args.keyID ??= "", args.counterparty, args.privileged, args.privilegedReason));
-        if (typeof args.forSelf === "boolean") {
-          paramWriter.writeInt8(args.forSelf ? 1 : 0);
-        } else {
-          paramWriter.writeInt8(-1);
-        }
-      } else {
-        paramWriter.write(this.encodePrivilegedParams(args.privileged, args.privilegedReason));
-      }
-      paramWriter.writeInt8(typeof args.seekPermission === "boolean" ? args.seekPermission ? 1 : 0 : -1);
-      const result = await this.transmit("getPublicKey", originator, paramWriter.toArray());
-      return {
-        publicKey: toHex(result)
-      };
-    }
-    async revealCounterpartyKeyLinkage(args, originator) {
-      const paramWriter = new Writer();
-      paramWriter.write(this.encodePrivilegedParams(args.privileged, args.privilegedReason));
-      paramWriter.write(toArray2(args.counterparty, "hex"));
-      paramWriter.write(toArray2(args.verifier, "hex"));
-      const result = await this.transmit("revealCounterpartyKeyLinkage", originator, paramWriter.toArray());
-      const resultReader = new Reader(result);
-      const prover = toHex(resultReader.read(33));
-      const verifier = toHex(resultReader.read(33));
-      const counterparty = toHex(resultReader.read(33));
-      const revelationTimeLength = resultReader.readVarIntNum();
-      const revelationTime = toUTF8(resultReader.read(revelationTimeLength));
-      const encryptedLinkageLength = resultReader.readVarIntNum();
-      const encryptedLinkage = resultReader.read(encryptedLinkageLength);
-      const encryptedLinkageProofLength = resultReader.readVarIntNum();
-      const encryptedLinkageProof = resultReader.read(encryptedLinkageProofLength);
-      return {
-        prover,
-        verifier,
-        counterparty,
-        revelationTime,
-        encryptedLinkage,
-        encryptedLinkageProof
-      };
-    }
-    async revealSpecificKeyLinkage(args, originator) {
-      const paramWriter = new Writer();
-      paramWriter.write(this.encodeKeyRelatedParams(args.protocolID, args.keyID, args.counterparty, args.privileged, args.privilegedReason));
-      paramWriter.write(toArray2(args.verifier, "hex"));
-      const result = await this.transmit("revealSpecificKeyLinkage", originator, paramWriter.toArray());
-      const resultReader = new Reader(result);
-      const prover = toHex(resultReader.read(33));
-      const verifier = toHex(resultReader.read(33));
-      const counterparty = toHex(resultReader.read(33));
-      const securityLevel = resultReader.readUInt8();
-      const protocolLength = resultReader.readVarIntNum();
-      const protocol = toUTF8(resultReader.read(protocolLength));
-      const keyIDLength = resultReader.readVarIntNum();
-      const keyID = toUTF8(resultReader.read(keyIDLength));
-      const encryptedLinkageLength = resultReader.readVarIntNum();
-      const encryptedLinkage = resultReader.read(encryptedLinkageLength);
-      const encryptedLinkageProofLength = resultReader.readVarIntNum();
-      const encryptedLinkageProof = resultReader.read(encryptedLinkageProofLength);
-      const proofType = resultReader.readUInt8();
-      return {
-        prover,
-        verifier,
-        counterparty,
-        protocolID: [securityLevel, protocol],
-        keyID,
-        encryptedLinkage,
-        encryptedLinkageProof,
-        proofType
-      };
-    }
-    async encrypt(args, originator) {
-      const paramWriter = new Writer();
-      paramWriter.write(this.encodeKeyRelatedParams(args.protocolID, args.keyID, args.counterparty, args.privileged, args.privilegedReason));
-      paramWriter.writeVarIntNum(args.plaintext.length);
-      paramWriter.write(args.plaintext);
-      paramWriter.writeInt8(typeof args.seekPermission === "boolean" ? args.seekPermission ? 1 : 0 : -1);
-      return {
-        ciphertext: await this.transmit("encrypt", originator, paramWriter.toArray())
-      };
-    }
-    async decrypt(args, originator) {
-      const paramWriter = new Writer();
-      paramWriter.write(this.encodeKeyRelatedParams(args.protocolID, args.keyID, args.counterparty, args.privileged, args.privilegedReason));
-      paramWriter.writeVarIntNum(args.ciphertext.length);
-      paramWriter.write(args.ciphertext);
-      paramWriter.writeInt8(typeof args.seekPermission === "boolean" ? args.seekPermission ? 1 : 0 : -1);
-      return {
-        plaintext: await this.transmit("decrypt", originator, paramWriter.toArray())
-      };
-    }
-    async createHmac(args, originator) {
-      const paramWriter = new Writer();
-      paramWriter.write(this.encodeKeyRelatedParams(args.protocolID, args.keyID, args.counterparty, args.privileged, args.privilegedReason));
-      paramWriter.writeVarIntNum(args.data.length);
-      paramWriter.write(args.data);
-      paramWriter.writeInt8(typeof args.seekPermission === "boolean" ? args.seekPermission ? 1 : 0 : -1);
-      return {
-        hmac: await this.transmit("createHmac", originator, paramWriter.toArray())
-      };
-    }
-    async verifyHmac(args, originator) {
-      const paramWriter = new Writer();
-      paramWriter.write(this.encodeKeyRelatedParams(args.protocolID, args.keyID, args.counterparty, args.privileged, args.privilegedReason));
-      paramWriter.write(args.hmac);
-      paramWriter.writeVarIntNum(args.data.length);
-      paramWriter.write(args.data);
-      paramWriter.writeInt8(typeof args.seekPermission === "boolean" ? args.seekPermission ? 1 : 0 : -1);
-      await this.transmit("verifyHmac", originator, paramWriter.toArray());
-      return { valid: true };
-    }
-    async createSignature(args, originator) {
-      const paramWriter = new Writer();
-      paramWriter.write(this.encodeKeyRelatedParams(args.protocolID, args.keyID, args.counterparty, args.privileged, args.privilegedReason));
-      if (typeof args.data === "object") {
-        paramWriter.writeUInt8(1);
-        paramWriter.writeVarIntNum(args.data.length);
-        paramWriter.write(args.data);
-      } else {
-        paramWriter.writeUInt8(2);
-        paramWriter.write(args.hashToDirectlySign ??= []);
-      }
-      paramWriter.writeInt8(typeof args.seekPermission === "boolean" ? args.seekPermission ? 1 : 0 : -1);
-      return {
-        signature: await this.transmit("createSignature", originator, paramWriter.toArray())
-      };
-    }
-    async verifySignature(args, originator) {
-      const paramWriter = new Writer();
-      paramWriter.write(this.encodeKeyRelatedParams(args.protocolID, args.keyID, args.counterparty, args.privileged, args.privilegedReason));
-      if (typeof args.forSelf === "boolean") {
-        paramWriter.writeInt8(args.forSelf ? 1 : 0);
-      } else {
-        paramWriter.writeInt8(-1);
-      }
-      paramWriter.writeVarIntNum(args.signature.length);
-      paramWriter.write(args.signature);
-      if (typeof args.data === "object") {
-        paramWriter.writeUInt8(1);
-        paramWriter.writeVarIntNum(args.data.length);
-        paramWriter.write(args.data);
-      } else {
-        paramWriter.writeUInt8(2);
-        paramWriter.write(args.hashToDirectlyVerify ?? []);
-      }
-      paramWriter.writeInt8(typeof args.seekPermission === "boolean" ? args.seekPermission ? 1 : 0 : -1);
-      await this.transmit("verifySignature", originator, paramWriter.toArray());
-      return { valid: true };
-    }
-    encodeKeyRelatedParams(protocolID, keyID, counterparty, privileged, privilegedReason) {
-      const paramWriter = new Writer();
-      paramWriter.writeUInt8(protocolID[0]);
-      const protocolAsArray = toArray2(protocolID[1], "utf8");
-      paramWriter.writeVarIntNum(protocolAsArray.length);
-      paramWriter.write(protocolAsArray);
-      const keyIDAsArray = toArray2(keyID, "utf8");
-      paramWriter.writeVarIntNum(keyIDAsArray.length);
-      paramWriter.write(keyIDAsArray);
-      if (typeof counterparty !== "string") {
-        paramWriter.writeUInt8(0);
-      } else if (counterparty === "self") {
-        paramWriter.writeUInt8(11);
-      } else if (counterparty === "anyone") {
-        paramWriter.writeUInt8(12);
-      } else {
-        paramWriter.write(toArray2(counterparty, "hex"));
-      }
-      paramWriter.write(this.encodePrivilegedParams(privileged, privilegedReason));
-      return paramWriter.toArray();
-    }
-    async acquireCertificate(args, originator) {
-      const paramWriter = new Writer();
-      paramWriter.write(toArray2(args.type, "base64"));
-      paramWriter.write(toArray2(args.certifier, "hex"));
-      const fieldEntries = Object.entries(args.fields);
-      paramWriter.writeVarIntNum(fieldEntries.length);
-      for (const [key, value] of fieldEntries) {
-        const keyAsArray = toArray2(key, "utf8");
-        const valueAsArray = toArray2(value, "utf8");
-        paramWriter.writeVarIntNum(keyAsArray.length);
-        paramWriter.write(keyAsArray);
-        paramWriter.writeVarIntNum(valueAsArray.length);
-        paramWriter.write(valueAsArray);
-      }
-      paramWriter.write(this.encodePrivilegedParams(args.privileged, args.privilegedReason));
-      paramWriter.writeUInt8(args.acquisitionProtocol === "direct" ? 1 : 2);
-      if (args.acquisitionProtocol === "direct") {
-        paramWriter.write(toArray2(args.serialNumber, "base64"));
-        paramWriter.write(this.encodeOutpoint(args.revocationOutpoint ?? ""));
-        const signatureAsArray = toArray2(args.signature, "hex");
-        paramWriter.writeVarIntNum(signatureAsArray.length);
-        paramWriter.write(signatureAsArray);
-        const keyringRevealerAsArray = args.keyringRevealer !== "certifier" ? toArray2(args.keyringRevealer, "hex") : [11];
-        paramWriter.write(keyringRevealerAsArray);
-        const keyringKeys = Object.keys(args.keyringForSubject ?? {});
-        paramWriter.writeVarIntNum(keyringKeys.length);
-        for (let i = 0; i < keyringKeys.length; i++) {
-          const keyringKeysAsArray = toArray2(keyringKeys[i], "utf8");
-          paramWriter.writeVarIntNum(keyringKeysAsArray.length);
-          paramWriter.write(keyringKeysAsArray);
-          const keyringForSubjectAsArray = toArray2(args.keyringForSubject?.[keyringKeys[i]], "base64");
-          paramWriter.writeVarIntNum(keyringForSubjectAsArray.length);
-          paramWriter.write(keyringForSubjectAsArray);
-        }
-      } else {
-        const certifierUrlAsArray = toArray2(args.certifierUrl, "utf8");
-        paramWriter.writeVarIntNum(certifierUrlAsArray.length);
-        paramWriter.write(certifierUrlAsArray);
-      }
-      const result = await this.transmit("acquireCertificate", originator, paramWriter.toArray());
-      const cert = Certificate.fromBinary(result);
-      return {
-        ...cert,
-        signature: cert.signature
-      };
-    }
-    encodePrivilegedParams(privileged, privilegedReason) {
-      const paramWriter = new Writer();
-      if (typeof privileged === "boolean") {
-        paramWriter.writeInt8(privileged ? 1 : 0);
-      } else {
-        paramWriter.writeInt8(-1);
-      }
-      if (typeof privilegedReason === "string") {
-        const privilegedReasonAsArray = toArray2(privilegedReason, "utf8");
-        paramWriter.writeInt8(privilegedReasonAsArray.length);
-        paramWriter.write(privilegedReasonAsArray);
-      } else {
-        paramWriter.writeInt8(-1);
-      }
-      return paramWriter.toArray();
-    }
-    async listCertificates(args, originator) {
-      const paramWriter = new Writer();
-      paramWriter.writeVarIntNum(args.certifiers.length);
-      for (let i = 0; i < args.certifiers.length; i++) {
-        paramWriter.write(toArray2(args.certifiers[i], "hex"));
-      }
-      paramWriter.writeVarIntNum(args.types.length);
-      for (let i = 0; i < args.types.length; i++) {
-        paramWriter.write(toArray2(args.types[i], "base64"));
-      }
-      if (typeof args.limit === "number") {
-        paramWriter.writeVarIntNum(args.limit);
-      } else {
-        paramWriter.writeVarIntNum(-1);
-      }
-      if (typeof args.offset === "number") {
-        paramWriter.writeVarIntNum(args.offset);
-      } else {
-        paramWriter.writeVarIntNum(-1);
-      }
-      paramWriter.write(this.encodePrivilegedParams(args.privileged, args.privilegedReason));
-      const result = await this.transmit("listCertificates", originator, paramWriter.toArray());
-      const resultReader = new Reader(result);
-      const totalCertificates = resultReader.readVarIntNum();
-      const certificates = [];
-      for (let i = 0; i < totalCertificates; i++) {
-        const certificateLength = resultReader.readVarIntNum();
-        const certificateBin = resultReader.read(certificateLength);
-        const cert = Certificate.fromBinary(certificateBin);
-        const keyringForVerifier = {};
-        if (resultReader.readInt8() === 1) {
-          const numFields = resultReader.readVarIntNum();
-          for (let i2 = 0; i2 < numFields; i2++) {
-            const fieldKeyLength = resultReader.readVarIntNum();
-            const fieldKey = toUTF8(resultReader.read(fieldKeyLength));
-            const fieldValueLength = resultReader.readVarIntNum();
-            keyringForVerifier[fieldKey] = toBase64(resultReader.read(fieldValueLength));
-          }
-        }
-        const verifierLength = resultReader.readVarIntNum();
-        let verifier = void 0;
-        if (verifierLength > 0) {
-          verifier = toUTF8(resultReader.read(verifierLength));
-        }
-        certificates.push({
-          ...cert,
-          signature: cert.signature,
-          keyring: keyringForVerifier,
-          verifier
-        });
-      }
-      return {
-        totalCertificates,
-        certificates
-      };
-    }
-    async proveCertificate(args, originator) {
-      const paramWriter = new Writer();
-      const typeAsArray = toArray2(args.certificate.type, "base64");
-      paramWriter.write(typeAsArray);
-      const subjectAsArray = toArray2(args.certificate.subject, "hex");
-      paramWriter.write(subjectAsArray);
-      const serialNumberAsArray = toArray2(args.certificate.serialNumber, "base64");
-      paramWriter.write(serialNumberAsArray);
-      const certifierAsArray = toArray2(args.certificate.certifier, "hex");
-      paramWriter.write(certifierAsArray);
-      const revocationOutpointAsArray = this.encodeOutpoint(args.certificate.revocationOutpoint ?? "");
-      paramWriter.write(revocationOutpointAsArray);
-      const signatureAsArray = toArray2(args.certificate.signature, "hex");
-      paramWriter.writeVarIntNum(signatureAsArray.length);
-      paramWriter.write(signatureAsArray);
-      const fieldEntries = Object.entries(args.certificate.fields ?? {});
-      paramWriter.writeVarIntNum(fieldEntries.length);
-      for (const [key, value] of fieldEntries) {
-        const keyAsArray = toArray2(key, "utf8");
-        const valueAsArray = toArray2(value, "utf8");
-        paramWriter.writeVarIntNum(keyAsArray.length);
-        paramWriter.write(keyAsArray);
-        paramWriter.writeVarIntNum(valueAsArray.length);
-        paramWriter.write(valueAsArray);
-      }
-      paramWriter.writeVarIntNum(args.fieldsToReveal.length);
-      for (const field of args.fieldsToReveal) {
-        const fieldAsArray = toArray2(field, "utf8");
-        paramWriter.writeVarIntNum(fieldAsArray.length);
-        paramWriter.write(fieldAsArray);
-      }
-      paramWriter.write(toArray2(args.verifier, "hex"));
-      paramWriter.write(this.encodePrivilegedParams(args.privileged, args.privilegedReason));
-      const result = await this.transmit("proveCertificate", originator, paramWriter.toArray());
-      const resultReader = new Reader(result);
-      const numFields = resultReader.readVarIntNum();
-      const keyringForVerifier = {};
-      for (let i = 0; i < numFields; i++) {
-        const fieldKeyLength = resultReader.readVarIntNum();
-        const fieldKey = toUTF8(resultReader.read(fieldKeyLength));
-        const fieldValueLength = resultReader.readVarIntNum();
-        keyringForVerifier[fieldKey] = toBase64(resultReader.read(fieldValueLength));
-      }
-      return {
-        keyringForVerifier
-      };
-    }
-    async relinquishCertificate(args, originator) {
-      const paramWriter = new Writer();
-      const typeAsArray = toArray2(args.type, "base64");
-      paramWriter.write(typeAsArray);
-      const serialNumberAsArray = toArray2(args.serialNumber, "base64");
-      paramWriter.write(serialNumberAsArray);
-      const certifierAsArray = toArray2(args.certifier, "hex");
-      paramWriter.write(certifierAsArray);
-      await this.transmit("relinquishCertificate", originator, paramWriter.toArray());
-      return { relinquished: true };
-    }
-    parseDiscoveryResult(result) {
-      const resultReader = new Reader(result);
-      const totalCertificates = resultReader.readVarIntNum();
-      const certificates = [];
-      for (let i = 0; i < totalCertificates; i++) {
-        const certBinLen = resultReader.readVarIntNum();
-        const certBin = resultReader.read(certBinLen);
-        const cert = Certificate.fromBinary(certBin);
-        const nameLength = resultReader.readVarIntNum();
-        const name = toUTF8(resultReader.read(nameLength));
-        const iconUrlLength = resultReader.readVarIntNum();
-        const iconUrl = toUTF8(resultReader.read(iconUrlLength));
-        const descriptionLength = resultReader.readVarIntNum();
-        const description = toUTF8(resultReader.read(descriptionLength));
-        const trust = resultReader.readUInt8();
-        const publiclyRevealedKeyring = {};
-        const numPublicKeyringEntries = resultReader.readVarIntNum();
-        for (let j = 0; j < numPublicKeyringEntries; j++) {
-          const fieldKeyLen = resultReader.readVarIntNum();
-          const fieldKey = toUTF8(resultReader.read(fieldKeyLen));
-          const fieldValueLen = resultReader.readVarIntNum();
-          publiclyRevealedKeyring[fieldKey] = resultReader.read(fieldValueLen);
-        }
-        const decryptedFields = {};
-        const numDecryptedFields = resultReader.readVarIntNum();
-        for (let k = 0; k < numDecryptedFields; k++) {
-          const fieldKeyLen = resultReader.readVarIntNum();
-          const fieldKey = toUTF8(resultReader.read(fieldKeyLen));
-          const fieldValueLen = resultReader.readVarIntNum();
-          decryptedFields[fieldKey] = toUTF8(resultReader.read(fieldValueLen));
-        }
-        certificates.push({
-          ...cert,
-          signature: cert.signature,
-          certifierInfo: { iconUrl, name, description, trust },
-          publiclyRevealedKeyring,
-          decryptedFields
-        });
-      }
-      return {
-        totalCertificates,
-        certificates
-      };
-    }
-    async discoverByIdentityKey(args, originator) {
-      const paramWriter = new Writer();
-      paramWriter.write(toArray2(args.identityKey, "hex"));
-      if (typeof args.limit === "number") {
-        paramWriter.writeVarIntNum(args.limit);
-      } else {
-        paramWriter.writeVarIntNum(-1);
-      }
-      if (typeof args.offset === "number") {
-        paramWriter.writeVarIntNum(args.offset);
-      } else {
-        paramWriter.writeVarIntNum(-1);
-      }
-      paramWriter.writeInt8(typeof args.seekPermission === "boolean" ? args.seekPermission ? 1 : 0 : -1);
-      const result = await this.transmit("discoverByIdentityKey", originator, paramWriter.toArray());
-      return this.parseDiscoveryResult(result);
-    }
-    async discoverByAttributes(args, originator) {
-      const paramWriter = new Writer();
-      const attributeKeys = Object.keys(args.attributes);
-      paramWriter.writeVarIntNum(attributeKeys.length);
-      for (let i = 0; i < attributeKeys.length; i++) {
-        paramWriter.writeVarIntNum(attributeKeys[i].length);
-        paramWriter.write(toArray2(attributeKeys[i], "utf8"));
-        paramWriter.writeVarIntNum(args.attributes[attributeKeys[i]].length);
-        paramWriter.write(toArray2(args.attributes[attributeKeys[i]], "utf8"));
-      }
-      if (typeof args.limit === "number") {
-        paramWriter.writeVarIntNum(args.limit);
-      } else {
-        paramWriter.writeVarIntNum(-1);
-      }
-      if (typeof args.offset === "number") {
-        paramWriter.writeVarIntNum(args.offset);
-      } else {
-        paramWriter.writeVarIntNum(-1);
-      }
-      paramWriter.writeInt8(typeof args.seekPermission === "boolean" ? args.seekPermission ? 1 : 0 : -1);
-      const result = await this.transmit("discoverByAttributes", originator, paramWriter.toArray());
-      return this.parseDiscoveryResult(result);
-    }
-    async isAuthenticated(args, originator) {
-      const result = await this.transmit("isAuthenticated", originator);
-      return { authenticated: result[0] === 1 };
-    }
-    async waitForAuthentication(args, originator) {
-      await this.transmit("waitForAuthentication", originator);
-      return { authenticated: true };
-    }
-    async getHeight(args, originator) {
-      const result = await this.transmit("getHeight", originator);
-      const resultReader = new Reader(result);
-      return {
-        height: resultReader.readVarIntNum()
-      };
-    }
-    async getHeaderForHeight(args, originator) {
-      const paramWriter = new Writer();
-      paramWriter.writeVarIntNum(args.height);
-      const header = await this.transmit("getHeaderForHeight", originator, paramWriter.toArray());
-      return {
-        header: toHex(header)
-      };
-    }
-    async getNetwork(args, originator) {
-      const net = await this.transmit("getNetwork", originator);
-      return {
-        network: net[0] === 0 ? "mainnet" : "testnet"
-      };
-    }
-    async getVersion(args, originator) {
-      const version = await this.transmit("getVersion", originator);
-      return {
-        version: toUTF8(version)
-      };
-    }
-  };
-
-  // node_modules/@bsv/sdk/dist/esm/src/wallet/substrates/HTTPWalletWire.js
-  var HTTPWalletWire = class {
-    baseUrl;
-    httpClient;
-    originator;
-    constructor(originator, baseUrl = "http://localhost:3301", httpClient = fetch) {
-      this.baseUrl = baseUrl;
-      this.httpClient = httpClient;
-      this.originator = originator;
-    }
-    async transmitToWallet(message) {
-      const messageReader = new Reader(message);
-      const callCode = messageReader.readUInt8();
-      const callName = WalletWireCalls_default[callCode];
-      if (callName === void 0 || callName === "") {
-        throw new Error(`Invalid call code: ${callCode}`);
-      }
-      const originatorLength = messageReader.readUInt8();
-      let originator;
-      if (originatorLength > 0) {
-        const originatorBytes = messageReader.read(originatorLength);
-        originator = toUTF8(originatorBytes);
-      }
-      const payload = messageReader.read();
-      const response = await fetch(`${this.baseUrl}/${callName}`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/octet-stream",
-          Origin: originator ?? ""
-          // ✅ Explicitly handle null/undefined cases
-        },
-        body: new Uint8Array(payload)
-      });
-      const responseBuffer = await response.arrayBuffer();
-      return Array.from(new Uint8Array(responseBuffer));
-    }
-  };
-
-  // node_modules/@bsv/sdk/dist/esm/src/wallet/WERR_REVIEW_ACTIONS.js
-  var WERR_REVIEW_ACTIONS = class extends Error {
-    reviewActionResults;
-    sendWithResults;
-    txid;
-    tx;
-    noSendChange;
-    code;
-    isError = true;
-    /**
-     * All parameters correspond to their comparable `createAction` or `signSction` results
-     * with the exception of `reviewActionResults`;
-     * which contains more details, particularly for double spend results.
-     */
-    constructor(reviewActionResults, sendWithResults, txid, tx, noSendChange) {
-      super("Undelayed createAction or signAction results require review.");
-      this.reviewActionResults = reviewActionResults;
-      this.sendWithResults = sendWithResults;
-      this.txid = txid;
-      this.tx = tx;
-      this.noSendChange = noSendChange;
-      this.code = 5;
-      this.name = this.constructor.name;
     }
   };
 
@@ -17749,231 +17120,6 @@ ${t.inputTxids.map((it) => `      '${it}'`).join(",\n")}
     }
   };
   var WERR_INVALID_PARAMETER_default = WERR_INVALID_PARAMETER;
-
-  // node_modules/@bsv/sdk/dist/esm/src/wallet/substrates/utils/toOriginHeader.js
-  function toOriginHeader(originator, fallbackScheme = "http") {
-    if (/^[a-z][a-z0-9+.-]*:\/\//i.test(originator)) {
-      try {
-        return new URL(originator).origin;
-      } catch {
-      }
-    }
-    try {
-      return new URL(`${fallbackScheme}://${originator}`).origin;
-    } catch {
-      throw new Error(`Invalid originator value: ${originator}`);
-    }
-  }
-
-  // node_modules/@bsv/sdk/dist/esm/src/wallet/WERR_INSUFFICIENT_FUNDS.js
-  var WERR_INSUFFICIENT_FUNDS = class extends Error {
-    totalSatoshisNeeded;
-    moreSatoshisNeeded;
-    code;
-    isError = true;
-    /**
-     * @param totalSatoshisNeeded Total satoshis required to fund transactions after net of required inputs and outputs.
-     * @param moreSatoshisNeeded Shortfall on total satoshis required to fund transactions after net of required inputs and outputs.
-     */
-    constructor(totalSatoshisNeeded, moreSatoshisNeeded) {
-      super(`Insufficient funds in the available inputs to cover the cost of the required outputs and the transaction fee (${moreSatoshisNeeded} more satoshis are needed, for a total of ${totalSatoshisNeeded}), plus whatever would be required in order to pay the fee to unlock and spend the outputs used to provide the additional satoshis.`);
-      this.totalSatoshisNeeded = totalSatoshisNeeded;
-      this.moreSatoshisNeeded = moreSatoshisNeeded;
-      this.code = 7;
-      this.name = this.constructor.name;
-    }
-  };
-  var WERR_INSUFFICIENT_FUNDS_default = WERR_INSUFFICIENT_FUNDS;
-
-  // node_modules/@bsv/sdk/dist/esm/src/wallet/substrates/HTTPWalletJSON.js
-  var HTTPWalletJSON = class {
-    baseUrl;
-    httpClient;
-    originator;
-    api;
-    // Fixed `any` types
-    constructor(originator, baseUrl = "http://localhost:3321", httpClient = fetch) {
-      this.baseUrl = baseUrl;
-      this.originator = originator;
-      this.httpClient = httpClient;
-      const isBrowser = typeof window !== "undefined" && typeof document !== "undefined" && window?.origin !== "file://";
-      this.api = async (call, args) => {
-        const origin = !isBrowser && this.originator ? toOriginHeader(this.originator, "http") : void 0;
-        if (!isBrowser && origin === void 0) {
-          console.error("Originator is required in Node.js environments");
-        }
-        const res = await await httpClient(`${this.baseUrl}/${call}`, {
-          method: "POST",
-          headers: {
-            Accept: "application/json",
-            "Content-Type": "application/json",
-            ...origin ? { Origin: origin } : {},
-            ...origin ? { Originator: origin } : {}
-          },
-          body: JSON.stringify(args)
-        });
-        const data = await res.json();
-        if (!res.ok) {
-          if (res.status === 400 && data.isError) {
-            let err2;
-            switch (data.code) {
-              case 5:
-                err2 = new WERR_REVIEW_ACTIONS(data.reviewActionResults, data.sendWithResults, data.txid, data.tx, data.noSendChange);
-                break;
-              case 6:
-                err2 = new WERR_INVALID_PARAMETER(data.parameter);
-                err2.message = data.message;
-                break;
-              case 7:
-                err2 = new WERR_INSUFFICIENT_FUNDS_default(data.totalSatoshisNeeded, data.moreSatoshisNeeded);
-                break;
-              default:
-                break;
-            }
-            if (err2)
-              throw err2;
-          }
-          const err = {
-            call,
-            args,
-            message: data.message ?? `HTTP Client error ${res.status}`
-          };
-          throw new Error(JSON.stringify(err));
-        }
-        return data;
-      };
-    }
-    async createAction(args) {
-      return await this.api("createAction", args);
-    }
-    async signAction(args) {
-      return await this.api("signAction", args);
-    }
-    async abortAction(args) {
-      return await this.api("abortAction", args);
-    }
-    async listActions(args) {
-      return await this.api("listActions", args);
-    }
-    async internalizeAction(args) {
-      return await this.api("internalizeAction", args);
-    }
-    async listOutputs(args) {
-      return await this.api("listOutputs", args);
-    }
-    async relinquishOutput(args) {
-      return await this.api("relinquishOutput", args);
-    }
-    async getPublicKey(args) {
-      return await this.api("getPublicKey", args);
-    }
-    async revealCounterpartyKeyLinkage(args) {
-      return await this.api("revealCounterpartyKeyLinkage", args);
-    }
-    async revealSpecificKeyLinkage(args) {
-      return await this.api("revealSpecificKeyLinkage", args);
-    }
-    async encrypt(args) {
-      return await this.api("encrypt", args);
-    }
-    async decrypt(args) {
-      return await this.api("decrypt", args);
-    }
-    async createHmac(args) {
-      return await this.api("createHmac", args);
-    }
-    async verifyHmac(args) {
-      return await this.api("verifyHmac", args);
-    }
-    async createSignature(args) {
-      return await this.api("createSignature", args);
-    }
-    async verifySignature(args) {
-      return await this.api("verifySignature", args);
-    }
-    async acquireCertificate(args) {
-      return await this.api("acquireCertificate", args);
-    }
-    async listCertificates(args) {
-      return await this.api("listCertificates", args);
-    }
-    async proveCertificate(args) {
-      return await this.api("proveCertificate", args);
-    }
-    async relinquishCertificate(args) {
-      return await this.api("relinquishCertificate", args);
-    }
-    async discoverByIdentityKey(args) {
-      return await this.api("discoverByIdentityKey", args);
-    }
-    async discoverByAttributes(args) {
-      return await this.api("discoverByAttributes", args);
-    }
-    async isAuthenticated(args) {
-      return await this.api("isAuthenticated", args);
-    }
-    async waitForAuthentication(args) {
-      return await this.api("waitForAuthentication", args);
-    }
-    async getHeight(args) {
-      return await this.api("getHeight", args);
-    }
-    async getHeaderForHeight(args) {
-      return await this.api("getHeaderForHeight", args);
-    }
-    async getNetwork(args) {
-      return await this.api("getNetwork", args);
-    }
-    async getVersion(args) {
-      return await this.api("getVersion", args);
-    }
-  };
-
-  // node_modules/@bsv/sdk/dist/esm/src/wallet/substrates/ReactNativeWebView.js
-  var ReactNativeWebView = class extends InvokableWalletBase {
-    domain;
-    constructor(domain = "*") {
-      super();
-      if (typeof window !== "object") {
-        throw new Error("The XDM substrate requires a global window object.");
-      }
-      if (!window.hasOwnProperty("ReactNativeWebView")) {
-        throw new Error("The window object does not have a ReactNativeWebView property.");
-      }
-      if (typeof window.ReactNativeWebView.postMessage !== "function") {
-        throw new Error("The window.ReactNativeWebView property does not seem to support postMessage calls.");
-      }
-      this.domain = domain;
-    }
-    async invoke(call, args) {
-      return await new Promise((resolve, reject) => {
-        const id = toBase64(Random_default(12));
-        const listener = (e) => {
-          const data = JSON.parse(e.data);
-          if (data.type !== "CWI" || data.id !== id || data.isInvocation === true) {
-            return;
-          }
-          if (typeof window.removeEventListener === "function") {
-            window.removeEventListener("message", listener);
-          }
-          if (data.status === "error") {
-            const err = new WalletError(data.description, data.code);
-            reject(err);
-          } else {
-            resolve(data.result);
-          }
-        };
-        window.addEventListener("message", listener);
-        window.ReactNativeWebView.postMessage(JSON.stringify({
-          type: "CWI",
-          isInvocation: true,
-          id,
-          call,
-          args
-        }));
-      });
-    }
-  };
 
   // node_modules/@bsv/sdk/dist/esm/src/wallet/validationHelpers.js
   function parseWalletOutpoint(outpoint) {
@@ -18065,51 +17211,49 @@ ${t.inputTxids.map((it) => `      '${it}'`).join(",\n")}
       return void 0;
     return validateBase64String(s2, name, min, max);
   }
-  function validateBase64String(s2, name, min, max) {
-    s2 = s2.trim();
-    if (s2.length === 0) {
-      throw new WERR_INVALID_PARAMETER_default(name, "valid base64 string");
-    }
+  function invalidBase64(name) {
+    throw new WERR_INVALID_PARAMETER_default(name, "valid base64 string");
+  }
+  function countBase64Padding(value, name) {
     let paddingCount = 0;
-    for (let i = 0; i < s2.length; i++) {
-      const char = s2.charCodeAt(i);
-      if (char >= 65 && char <= 90)
+    for (let i = 0; i < value.length; i++) {
+      const char = value.codePointAt(i) ?? 0;
+      const isLetter = char >= 65 && char <= 90 || char >= 97 && char <= 122;
+      const isDigit = char >= 48 && char <= 57;
+      if (isLetter || isDigit || char === 43 || char === 47)
         continue;
-      if (char >= 97 && char <= 122)
-        continue;
-      if (char >= 48 && char <= 57)
-        continue;
-      if (char === 43)
-        continue;
-      if (char === 47)
-        continue;
-      if (char === 61) {
-        if (i < s2.length - 2) {
-          throw new WERR_INVALID_PARAMETER_default(name, "valid base64 string");
-        }
-        paddingCount++;
-        continue;
-      }
-      throw new WERR_INVALID_PARAMETER_default(name, "valid base64 string");
+      if (char !== 61 || i < value.length - 2)
+        invalidBase64(name);
+      paddingCount++;
     }
-    if (paddingCount > 2) {
-      throw new WERR_INVALID_PARAMETER_default(name, "valid base64 string");
-    }
-    if (paddingCount > 0 && s2.length % 4 !== 0) {
-      throw new WERR_INVALID_PARAMETER_default(name, "valid base64 string");
-    }
-    const mod = s2.length % 4;
-    if (mod !== 0 && mod !== 4 - paddingCount) {
-      throw new WERR_INVALID_PARAMETER_default(name, "valid base64 string");
-    }
-    const encodedLength = s2.length - paddingCount;
-    const bytes2 = Math.floor(encodedLength * 3 / 4);
+    return paddingCount;
+  }
+  function validateBase64Padding(value, paddingCount, name) {
+    if (paddingCount > 2)
+      invalidBase64(name);
+    if (paddingCount > 0 && value.length % 4 !== 0)
+      invalidBase64(name);
+    const mod = value.length % 4;
+    if (mod !== 0 && mod !== 4 - paddingCount)
+      invalidBase64(name);
+  }
+  function validateDecodedBase64Length(bytes2, name, min, max) {
     if (min !== void 0 && bytes2 < min) {
       throw new WERR_INVALID_PARAMETER_default(name, `at least ${min} bytes`);
     }
     if (max !== void 0 && bytes2 > max) {
       throw new WERR_INVALID_PARAMETER_default(name, `no more than ${max} bytes`);
     }
+  }
+  function validateBase64String(s2, name, min, max) {
+    s2 = s2.trim();
+    if (s2.length === 0)
+      invalidBase64(name);
+    const paddingCount = countBase64Padding(s2, name);
+    validateBase64Padding(s2, paddingCount, name);
+    const encodedLength = s2.length - paddingCount;
+    const bytes2 = Math.floor(encodedLength * 3 / 4);
+    validateDecodedBase64Length(bytes2, name, min, max);
     return s2;
   }
   function validateOptionalHexString(s2, name, min, max) {
@@ -18117,25 +17261,27 @@ ${t.inputTxids.map((it) => `      '${it}'`).join(",\n")}
       return void 0;
     return validateHexString(s2, name, min, max);
   }
+  var normalizedHexRegex = /^[0-9a-f]+$/;
+  var hexRegex = /^[0-9A-Fa-f]+$/;
   function validateHexString(s2, name, min, max) {
-    s2 = s2.trim().toLowerCase();
+    s2 = s2.trim();
     if (s2.length % 2 === 1)
       throw new WERR_INVALID_PARAMETER_default(name, `even length, not ${s2.length}.`);
-    const hexRegex = /^[0-9A-Fa-f]+$/;
-    if (!hexRegex.test(s2))
+    const isNormalized = normalizedHexRegex.test(s2);
+    if (!isNormalized && !hexRegex.test(s2))
       throw new WERR_INVALID_PARAMETER_default(name, "hexadecimal string.");
     if (min !== void 0 && s2.length < min)
       throw new WERR_INVALID_PARAMETER_default(name, `at least ${min} length.`);
     if (max !== void 0 && s2.length > max)
       throw new WERR_INVALID_PARAMETER_default(name, `no more than ${max} length.`);
-    return s2;
+    return isNormalized ? s2 : s2.toLowerCase();
   }
   function validateCreateActionInput(i) {
     if (i.unlockingScript === void 0 && i.unlockingScriptLength === void 0) {
       throw new WERR_INVALID_PARAMETER_default("unlockingScript, unlockingScriptLength", "at least one valid value.");
     }
     const unlockingScript = validateOptionalHexString(i.unlockingScript, "unlockingScript");
-    const unlockingScriptLength = i.unlockingScriptLength ?? (unlockingScript != null ? unlockingScript.length / 2 : 0);
+    const unlockingScriptLength = i.unlockingScriptLength ?? (unlockingScript == null ? 0 : unlockingScript.length / 2);
     if (unlockingScript && unlockingScriptLength !== unlockingScript.length / 2) {
       throw new WERR_INVALID_PARAMETER_default("unlockingScriptLength", "length unlockingScript if both valid.");
     }
@@ -18160,10 +17306,11 @@ ${t.inputTxids.map((it) => `      '${it}'`).join(",\n")}
     return vo;
   }
   function validateCreateActionOptions(options) {
-    const o = options != null ? options : {};
+    const o = options ?? {};
     const vo = {
       signAndProcess: defaultTrue(o.signAndProcess),
       acceptDelayedBroadcast: defaultTrue(o.acceptDelayedBroadcast),
+      trustSelf: o.trustSelf,
       knownTxids: defaultEmpty(o.knownTxids),
       returnTXIDOnly: defaultFalse(o.returnTXIDOnly),
       noSend: defaultFalse(o.noSend),
@@ -18204,7 +17351,7 @@ ${t.inputTxids.map((it) => `      '${it}'`).join(",\n")}
     return vargs;
   }
   function validateSignActionOptions(options) {
-    const o = options != null ? options : {};
+    const o = options ?? {};
     const vo = {
       acceptDelayedBroadcast: defaultTrue(o.acceptDelayedBroadcast),
       returnTXIDOnly: defaultFalse(o.returnTXIDOnly),
@@ -18252,7 +17399,6 @@ ${t.inputTxids.map((it) => `      '${it}'`).join(",\n")}
     const v = {
       basket: validateBasket(args.basket),
       customInstructions: validateOptionalStringLength(args.customInstructions, "customInstructions", 0, 1e3),
-      // TODO: real max??
       tags: defaultEmpty(args.tags).map((t) => validateTag(t))
     };
     return v;
@@ -18274,7 +17420,7 @@ ${t.inputTxids.map((it) => `      '${it}'`).join(",\n")}
       tx: args.tx,
       outputs: args.outputs.map((o) => validateInternalizeOutput(o)),
       description: validateStringLength(args.description, "description", 5, 2e3),
-      labels: (args.labels != null ? args.labels : []).map((t) => validateLabel(t)),
+      labels: (args.labels ?? []).map((t) => validateLabel(t)),
       seekPermission: defaultTrue(args.seekPermission)
     };
     try {
@@ -18470,7 +17616,7 @@ ${t.inputTxids.map((it) => `      '${it}'`).join(",\n")}
       throw new WERR_INVALID_PARAMETER_default("tagQueryMode", "undefined, 'any', or 'all'");
     const vargs = {
       basket: validateBasket(args.basket),
-      tags: (args.tags != null ? args.tags : []).map((t) => validateTag(t)),
+      tags: (args.tags ?? []).map((t) => validateTag(t)),
       tagQueryMode,
       includeLockingScripts: args.include === "locking scripts",
       includeTransactions: args.include === "entire transactions",
@@ -18478,7 +17624,7 @@ ${t.inputTxids.map((it) => `      '${it}'`).join(",\n")}
       includeTags: defaultFalse(args.includeTags),
       includeLabels: defaultFalse(args.includeLabels),
       limit: validateInteger(args.limit, "limit", 10, 1, 1e4),
-      offset: validateInteger(args.offset, "offset", 0, void 0, void 0),
+      offset: validateInteger(args.offset, "offset", 0),
       seekPermission: defaultTrue(args.seekPermission),
       knownTxids: []
     };
@@ -18493,7 +17639,7 @@ ${t.inputTxids.map((it) => `      '${it}'`).join(",\n")}
     else
       throw new WERR_INVALID_PARAMETER_default("labelQueryMode", "undefined, 'any', or 'all'");
     const vargs = {
-      labels: (args.labels != null ? args.labels : []).map((t) => validateLabel(t)),
+      labels: (args.labels ?? []).map((t) => validateLabel(t)),
       labelQueryMode,
       includeLabels: defaultFalse(args.includeLabels),
       includeInputs: defaultFalse(args.includeInputs),
@@ -18509,7 +17655,2713 @@ ${t.inputTxids.map((it) => `      '${it}'`).join(",\n")}
   }
   var specOpThrowReviewActions = "a496e747fc3ad5fabdd4ae8f91184e71f87539bd3d962aa2548942faaaf0047a";
 
+  // node_modules/@bsv/sdk/dist/esm/src/wallet/Wallet.interfaces.js
+  var SecurityLevels;
+  (function(SecurityLevels2) {
+    SecurityLevels2[SecurityLevels2["Silent"] = 0] = "Silent";
+    SecurityLevels2[SecurityLevels2["App"] = 1] = "App";
+    SecurityLevels2[SecurityLevels2["Counterparty"] = 2] = "Counterparty";
+  })(SecurityLevels || (SecurityLevels = {}));
+
+  // node_modules/@bsv/sdk/dist/esm/src/wallet/BRC100ByteEncoding.js
+  var hasOwn = Object.prototype.hasOwnProperty;
+  var walletByteFieldNames = /* @__PURE__ */ new Set([
+    "BEEF",
+    "atomicBEEF",
+    "beef",
+    "ciphertext",
+    "competingBeef",
+    "data",
+    "encryptedLinkage",
+    "encryptedLinkageProof",
+    "hashToDirectlySign",
+    "hashToDirectlyVerify",
+    "hmac",
+    "inputBEEF",
+    "payload",
+    "plaintext",
+    "signature",
+    "transaction",
+    "tx"
+  ]);
+  function isUint8Array(value) {
+    if (value == null || typeof value !== "object" || typeof ArrayBuffer === "undefined")
+      return false;
+    return ArrayBuffer.isView(value) && Object.prototype.toString.call(value) === "[object Uint8Array]";
+  }
+  function isByte(value) {
+    return Number.isInteger(value) && value >= 0 && value <= 255;
+  }
+  function isUnsupportedBinaryView(value) {
+    return value != null && typeof value === "object" && typeof ArrayBuffer !== "undefined" && (ArrayBuffer.isView(value) || Object.prototype.toString.call(value) === "[object ArrayBuffer]");
+  }
+  function normalizeByteNumberArray(value) {
+    for (let i = 0; i < value.length; i++) {
+      if (!hasOwn.call(value, i) || !isByte(value[i]))
+        return void 0;
+    }
+    return value;
+  }
+  function normalizeHistoricalByteObject(value) {
+    if (value == null || typeof value !== "object")
+      return void 0;
+    try {
+      const keys = Object.keys(value);
+      if (keys.length === 0)
+        return void 0;
+      const bytes2 = [];
+      for (let i = 0; i < keys.length; i++) {
+        if (keys[i] !== String(i))
+          return void 0;
+        const byte = value[keys[i]];
+        if (!isByte(byte))
+          return void 0;
+        bytes2.push(byte);
+      }
+      return bytes2;
+    } catch {
+      return void 0;
+    }
+  }
+  function normalizeBRC100ByteArray(value) {
+    if (isUint8Array(value))
+      return value;
+    if (isUnsupportedBinaryView(value))
+      return void 0;
+    if (Array.isArray(value))
+      return normalizeByteNumberArray(value);
+    return normalizeHistoricalByteObject(value);
+  }
+  function brc100JsonReplacer(key, value) {
+    const original = this == null ? void 0 : this[key];
+    if (isUint8Array(original))
+      return Array.from(original);
+    return isUint8Array(value) ? Array.from(value) : value;
+  }
+  function stringifyBRC100(value, space) {
+    const serialized = JSON.stringify(value, brc100JsonReplacer, space);
+    if (serialized === void 0) {
+      throw new TypeError("BRC-100 JSON payload is not serializable");
+    }
+    return serialized;
+  }
+  function visitBRC100WalletByteField(candidate, key, fieldValue, visit) {
+    const bytes2 = normalizeBRC100ByteArray(fieldValue);
+    if (bytes2 != null)
+      candidate[key] = bytes2;
+    else
+      visit(fieldValue);
+  }
+  function normalizeBRC100WalletByteFields(value) {
+    const seen = /* @__PURE__ */ new WeakSet();
+    const visit = (candidate) => {
+      if (candidate == null || typeof candidate !== "object" || isUint8Array(candidate))
+        return;
+      if (seen.has(candidate))
+        return;
+      seen.add(candidate);
+      if (Array.isArray(candidate)) {
+        for (const item of candidate)
+          visit(item);
+        return;
+      }
+      for (const [key, fieldValue] of Object.entries(candidate)) {
+        if (walletByteFieldNames.has(key)) {
+          visitBRC100WalletByteField(candidate, key, fieldValue, visit);
+        } else {
+          visit(fieldValue);
+        }
+      }
+    };
+    visit(value);
+    return value;
+  }
+
+  // node_modules/@bsv/sdk/dist/esm/src/wallet/KeyDeriver.js
+  var KeyDeriver = class {
+    cacheSharedSecret;
+    retrieveCachedSharedSecret;
+    rootKey;
+    identityKey;
+    anyone;
+    /**
+     * Initializes the KeyDeriver instance with a root private key.
+     * @param {PrivateKey | 'anyone'} rootKey - The root private key or the string 'anyone'.
+     */
+    constructor(rootKey, cacheSharedSecret, retrieveCachedSharedSecret) {
+      this.cacheSharedSecret = cacheSharedSecret;
+      this.retrieveCachedSharedSecret = retrieveCachedSharedSecret;
+      this.anyone = new PrivateKey(1).toPublicKey();
+      if (rootKey === "anyone") {
+        this.rootKey = new PrivateKey(1);
+      } else {
+        this.rootKey = rootKey;
+      }
+      this.identityKey = this.rootKey.toPublicKey().toString();
+    }
+    /**
+     * Derives a public key based on protocol ID, key ID, and counterparty.
+     * @param {WalletProtocol} protocolID - The protocol ID including a security level and protocol name.
+     * @param {string} keyID - The key identifier.
+     * @param {Counterparty} counterparty - The counterparty's public key or a predefined value ('self' or 'anyone').
+     * @param {boolean} [forSelf=false] - Whether deriving for self.
+     * @returns {PublicKey} - The derived public key.
+     */
+    derivePublicKey(protocolID, keyID, counterparty, forSelf = false) {
+      counterparty = this.normalizeCounterparty(counterparty);
+      if (forSelf) {
+        return this.rootKey.deriveChild(counterparty, this.computeInvoiceNumber(protocolID, keyID), this.cacheSharedSecret, this.retrieveCachedSharedSecret).toPublicKey();
+      } else {
+        return counterparty.deriveChild(this.rootKey, this.computeInvoiceNumber(protocolID, keyID), this.cacheSharedSecret, this.retrieveCachedSharedSecret);
+      }
+    }
+    /**
+     * Derives a private key based on protocol ID, key ID, and counterparty.
+     * @param {WalletProtocol} protocolID - The protocol ID including a security level and protocol name.
+     * @param {string} keyID - The key identifier.
+     * @param {Counterparty} counterparty - The counterparty's public key or a predefined value ('self' or 'anyone').
+     * @returns {PrivateKey} - The derived private key.
+     */
+    derivePrivateKey(protocolID, keyID, counterparty) {
+      counterparty = this.normalizeCounterparty(counterparty);
+      return this.rootKey.deriveChild(counterparty, this.computeInvoiceNumber(protocolID, keyID), this.cacheSharedSecret, this.retrieveCachedSharedSecret);
+    }
+    derivePrivateKeys(derivations) {
+      const prepared = derivations.map((derivation, index) => ({
+        index,
+        counterparty: this.normalizeCounterparty(derivation.counterparty),
+        invoiceNumber: this.computeInvoiceNumber(derivation.protocolID, derivation.keyID)
+      }));
+      const groups = /* @__PURE__ */ new Map();
+      for (const derivation of prepared) {
+        const key = derivation.counterparty.toString();
+        const group = groups.get(key) ?? [];
+        group.push(derivation);
+        groups.set(key, group);
+      }
+      const results = [];
+      for (const group of groups.values()) {
+        let sharedSecret;
+        for (let index = 0; index < group.length; index++) {
+          const derivation = group[index];
+          results[derivation.index] = this.rootKey.deriveChild(derivation.counterparty, derivation.invoiceNumber, index === 0 ? (priv, pub, point) => {
+            sharedSecret = point;
+            this.cacheSharedSecret?.(priv, pub, point);
+          } : void 0, index === 0 ? (priv, pub) => {
+            sharedSecret = this.retrieveCachedSharedSecret?.(priv, pub);
+            return sharedSecret;
+          } : () => sharedSecret);
+        }
+      }
+      return results;
+    }
+    /**
+     * Derives a symmetric key based on protocol ID, key ID, and counterparty.
+     * Note: Symmetric keys should not be derivable by everyone due to security risks.
+     * @param {WalletProtocol} protocolID - The protocol ID including a security level and protocol name.
+     * @param {string} keyID - The key identifier.
+     * @param {Counterparty} counterparty - The counterparty's public key or a predefined value ('self' or 'anyone').
+     * @returns {SymmetricKey} - The derived symmetric key.
+     */
+    deriveSymmetricKey(protocolID, keyID, counterparty) {
+      if (counterparty === "anyone") {
+        counterparty = this.anyone;
+      } else {
+        counterparty = this.normalizeCounterparty(counterparty);
+      }
+      const derivedPublicKey = this.derivePublicKey(protocolID, keyID, counterparty);
+      const derivedPrivateKey = this.derivePrivateKey(protocolID, keyID, counterparty);
+      return new SymmetricKey(derivedPrivateKey.deriveSharedSecret(derivedPublicKey)?.x?.toArray() ?? []);
+    }
+    accelerationBackend(operation) {
+      const backend = readyAsyncCryptoBackend("multiplyPublicKey");
+      if (backend === void 0 || !backend.supportsCrypto(operation) || !backend.supportsCrypto("publicKeyFromPrivate")) {
+        return void 0;
+      }
+      return backend;
+    }
+    async sharedSecretBytes(backend, counterparty) {
+      const retrieved = this.retrieveCachedSharedSecret?.(this.rootKey, counterparty);
+      if (retrieved !== void 0) {
+        return Uint8Array.from(retrieved.encode(true));
+      }
+      const sharedSecret = validateAsyncCryptoBytes("multiplyPublicKey", await backend.multiplyPublicKey(Uint8Array.from(counterparty.encode(true)), Uint8Array.from(this.rootKey.toArray("be", 32))), 33);
+      const sharedSecretPoint = Point.fromDER(Array.from(sharedSecret));
+      this.cacheSharedSecret?.(this.rootKey, counterparty, sharedSecretPoint);
+      return Uint8Array.from(sharedSecretPoint.encode(true));
+    }
+    async childTweak(backend, protocolID, keyID, counterparty) {
+      const sharedSecret = await this.sharedSecretBytes(backend, counterparty);
+      const invoiceNumber = utils_exports.toArray(this.computeInvoiceNumber(protocolID, keyID), "utf8");
+      const curve2 = new Curve();
+      return Uint8Array.from(new BigNumber(Hash_exports.sha256hmac(sharedSecret, invoiceNumber)).mod(curve2.n).toArray("be", 32));
+    }
+    async derivePublicKeyAsync(protocolID, keyID, counterparty, forSelf = false) {
+      const backend = this.accelerationBackend(forSelf ? "tweakPrivateKeyAdd" : "tweakPublicKeyAdd");
+      if (backend === void 0) {
+        return this.derivePublicKey(protocolID, keyID, counterparty, forSelf);
+      }
+      const normalizedCounterparty = this.normalizeCounterparty(counterparty);
+      const tweak = await this.childTweak(backend, protocolID, keyID, normalizedCounterparty);
+      let publicKey;
+      if (forSelf) {
+        const privateKey = validateAsyncCryptoBytes("tweakPrivateKeyAdd", await backend.tweakPrivateKeyAdd(Uint8Array.from(this.rootKey.toArray("be", 32)), tweak), 32);
+        publicKey = await backend.publicKeyFromPrivate(privateKey);
+      } else {
+        publicKey = await backend.tweakPublicKeyAdd(Uint8Array.from(normalizedCounterparty.encode(true)), tweak);
+      }
+      return PublicKey.fromDER(Array.from(validateAsyncCryptoBytes(forSelf ? "publicKeyFromPrivate" : "tweakPublicKeyAdd", publicKey, 33)));
+    }
+    async deriveSymmetricKeyAsync(protocolID, keyID, counterparty) {
+      const backend = this.accelerationBackend("tweakPrivateKeyAdd");
+      if (!backend?.supportsCrypto("tweakPublicKeyAdd")) {
+        return this.deriveSymmetricKey(protocolID, keyID, counterparty);
+      }
+      const normalizedCounterparty = counterparty === "anyone" ? this.anyone : this.normalizeCounterparty(counterparty);
+      const tweak = await this.childTweak(backend, protocolID, keyID, normalizedCounterparty);
+      const [privateKeyResult, publicKeyResult] = await Promise.all([
+        backend.tweakPrivateKeyAdd(Uint8Array.from(this.rootKey.toArray("be", 32)), tweak),
+        backend.tweakPublicKeyAdd(Uint8Array.from(normalizedCounterparty.encode(true)), tweak)
+      ]);
+      const privateKey = validateAsyncCryptoBytes("tweakPrivateKeyAdd", privateKeyResult, 32);
+      const publicKey = validateAsyncCryptoBytes("tweakPublicKeyAdd", publicKeyResult, 33);
+      PublicKey.fromDER(Array.from(publicKey));
+      const sharedSecret = validateAsyncCryptoBytes("multiplyPublicKey", await backend.multiplyPublicKey(publicKey, privateKey), 33);
+      Point.fromDER(Array.from(sharedSecret));
+      return new SymmetricKey(Array.from(sharedSecret.slice(1)));
+    }
+    /**
+     * Reveals the shared secret between the root key and the counterparty.
+     * Note: This should not be used for 'self'.
+     * @param {Counterparty} counterparty - The counterparty's public key or a predefined value ('self' or 'anyone').
+     * @returns {number[]} - The shared secret as a number array.
+     * @throws {Error} - Throws an error if attempting to reveal a shared secret for 'self'.
+     */
+    revealCounterpartySecret(counterparty) {
+      if (counterparty === "self") {
+        throw new Error("Counterparty secrets cannot be revealed for counterparty=self.");
+      }
+      counterparty = this.normalizeCounterparty(counterparty);
+      const self = this.rootKey.toPublicKey();
+      const keyDerivedBySelf = this.rootKey.deriveChild(self, "test").toHex();
+      const keyDerivedByCounterparty = this.rootKey.deriveChild(counterparty, "test").toHex();
+      if (keyDerivedBySelf === keyDerivedByCounterparty) {
+        throw new Error("Counterparty secrets cannot be revealed for counterparty=self.");
+      }
+      return this.rootKey.deriveSharedSecret(counterparty).encode(true);
+    }
+    /**
+     * Reveals the specific key association for a given protocol ID, key ID, and counterparty.
+     * @param {Counterparty} counterparty - The counterparty's public key or a predefined value ('self' or 'anyone').
+     * @param {WalletProtocol} protocolID - The protocol ID including a security level and protocol name.
+     * @param {string} keyID - The key identifier.
+     * @returns {number[]} - The specific key association as a number array.
+     */
+    revealSpecificSecret(counterparty, protocolID, keyID) {
+      counterparty = this.normalizeCounterparty(counterparty);
+      const sharedSecret = this.rootKey.deriveSharedSecret(counterparty);
+      const invoiceNumberBin = utils_exports.toArray(this.computeInvoiceNumber(protocolID, keyID), "utf8");
+      return Hash_exports.sha256hmac(sharedSecret.encode(true), invoiceNumberBin);
+    }
+    /**
+     * Normalizes the counterparty to a public key.
+     * @param {Counterparty} counterparty - The counterparty's public key or a predefined value ('self' or 'anyone').
+     * @returns {PublicKey} - The normalized counterparty public key.
+     * @throws {Error} - Throws an error if the counterparty is invalid.
+     */
+    normalizeCounterparty(counterparty) {
+      if (counterparty === null || counterparty === void 0) {
+        throw new Error("counterparty must be self, anyone or a public key!");
+      } else if (counterparty === "self") {
+        return this.rootKey.toPublicKey();
+      } else if (counterparty === "anyone") {
+        return new PrivateKey(1).toPublicKey();
+      } else if (typeof counterparty === "string") {
+        return PublicKey.fromString(counterparty);
+      } else {
+        return counterparty;
+      }
+    }
+    /**
+     * Computes the invoice number based on the protocol ID and key ID.
+     * @param {WalletProtocol} protocolID - The protocol ID including a security level and protocol name.
+     * @param {string} keyID - The key identifier.
+     * @returns {string} - The computed invoice number.
+     * @throws {Error} - Throws an error if protocol ID or key ID are invalid.
+     */
+    computeInvoiceNumber(protocolID, keyID) {
+      const securityLevel = protocolID[0];
+      if (!Number.isInteger(securityLevel) || securityLevel < 0 || securityLevel > 2) {
+        throw new Error("Protocol security level must be 0, 1, or 2");
+      }
+      const protocolName = protocolID[1].toLowerCase().trim();
+      if (keyID.length > 800) {
+        throw new Error("Key IDs must be 800 characters or less");
+      }
+      if (keyID.length < 1) {
+        throw new Error("Key IDs must be 1 character or more");
+      }
+      if (protocolName.length > 400) {
+        if (protocolName.startsWith("specific linkage revelation ")) {
+          if (protocolName.length > 430) {
+            throw new Error("Specific linkage revelation protocol names must be 430 characters or less");
+          }
+        } else {
+          throw new Error("Protocol names must be 400 characters or less");
+        }
+      }
+      if (protocolName.length < 5) {
+        throw new Error("Protocol names must be 5 characters or more");
+      }
+      if (protocolName.includes("  ")) {
+        throw new Error('Protocol names cannot contain multiple consecutive spaces ("  ")');
+      }
+      if (!/^[a-z0-9 ]+$/g.test(protocolName)) {
+        throw new Error("Protocol names can only contain letters, numbers and spaces");
+      }
+      if (protocolName.endsWith(" protocol")) {
+        throw new Error('No need to end your protocol name with " protocol"');
+      }
+      return `${securityLevel}-${protocolName}-${keyID}`;
+    }
+  };
+
+  // node_modules/@bsv/sdk/dist/esm/src/wallet/CachedKeyDeriver.js
+  var CachedKeyDeriver = class {
+    keyDeriver;
+    cache;
+    maxCacheSize;
+    /**
+     * The root key from which all other keys are derived.
+     */
+    rootKey;
+    /**
+     * The identity of this key deriver which is normally the public key associated with the `rootKey`
+     */
+    identityKey;
+    /**
+     * Initializes the CachedKeyDeriver instance with a root private key and optional cache settings.
+     * @param {PrivateKey | 'anyone'} rootKey - The root private key or the string 'anyone'.
+     * @param {Object} [options] - Optional settings for the cache.
+     * @param {number} [options.maxCacheSize=1000] - The maximum number of entries to store in the cache.
+     */
+    constructor(rootKey, options) {
+      if (rootKey === "anyone") {
+        this.rootKey = new PrivateKey(1);
+      } else {
+        this.rootKey = rootKey;
+      }
+      this.keyDeriver = new KeyDeriver(this.rootKey, (priv, pub, point) => {
+        this.cacheSet(`${priv.toString()}-${pub.toString()}`, point);
+      }, (priv, pub) => {
+        return this.cacheGet(`${priv.toString()}-${pub.toString()}`);
+      });
+      this.identityKey = this.rootKey.toPublicKey().toString();
+      this.cache = /* @__PURE__ */ new Map();
+      const maxCacheSize = options?.maxCacheSize;
+      this.maxCacheSize = maxCacheSize != null && !Number.isNaN(maxCacheSize) && maxCacheSize > 0 ? maxCacheSize : 1e3;
+    }
+    /**
+     * Derives a public key based on protocol ID, key ID, and counterparty.
+     * Caches the result for future calls with the same parameters.
+     * @param {WalletProtocol} protocolID - The protocol ID including a security level and protocol name.
+     * @param {string} keyID - The key identifier.
+     * @param {Counterparty} counterparty - The counterparty's public key or a predefined value ('self' or 'anyone').
+     * @param {boolean} [forSelf=false] - Whether deriving for self.
+     * @returns {PublicKey} - The derived public key.
+     */
+    derivePublicKey(protocolID, keyID, counterparty, forSelf = false) {
+      const cacheKey = this.generateCacheKey("derivePublicKey", protocolID, keyID, counterparty, forSelf);
+      if (this.cache.has(cacheKey)) {
+        const cachedValue = this.cacheGet(cacheKey);
+        if (cachedValue === void 0) {
+          throw new Error("Cached value is undefined");
+        }
+        return cachedValue;
+      } else {
+        const result = this.keyDeriver.derivePublicKey(protocolID, keyID, counterparty, forSelf);
+        this.cacheSet(cacheKey, result);
+        return result;
+      }
+    }
+    async derivePublicKeyAsync(protocolID, keyID, counterparty, forSelf = false) {
+      const cacheKey = this.generateCacheKey("derivePublicKey", protocolID, keyID, counterparty, forSelf);
+      const cachedValue = this.cacheGet(cacheKey);
+      if (cachedValue !== void 0)
+        return cachedValue;
+      const result = await this.keyDeriver.derivePublicKeyAsync(protocolID, keyID, counterparty, forSelf);
+      this.cacheSet(cacheKey, result);
+      return result;
+    }
+    /**
+     * Derives a private key based on protocol ID, key ID, and counterparty.
+     * Caches the result for future calls with the same parameters.
+     * @param {WalletProtocol} protocolID - The protocol ID including a security level and protocol name.
+     * @param {string} keyID - The key identifier.
+     * @param {Counterparty} counterparty - The counterparty's public key or a predefined value ('self' or 'anyone').
+     * @returns {PrivateKey} - The derived private key.
+     */
+    derivePrivateKey(protocolID, keyID, counterparty) {
+      const cacheKey = this.generateCacheKey("derivePrivateKey", protocolID, keyID, counterparty);
+      if (this.cache.has(cacheKey)) {
+        const cachedValue = this.cacheGet(cacheKey);
+        if (cachedValue === void 0) {
+          throw new Error("Cached value is undefined");
+        }
+        return cachedValue;
+      } else {
+        const result = this.keyDeriver.derivePrivateKey(protocolID, keyID, counterparty);
+        this.cacheSet(cacheKey, result);
+        return result;
+      }
+    }
+    derivePrivateKeys(derivations) {
+      const results = [];
+      const missing = [];
+      const missingIndexes = [];
+      const missingCacheKeys = [];
+      for (let index = 0; index < derivations.length; index++) {
+        const derivation = derivations[index];
+        const cacheKey = this.generateCacheKey("derivePrivateKey", derivation.protocolID, derivation.keyID, derivation.counterparty);
+        const cached = this.cacheGet(cacheKey);
+        if (cached instanceof PrivateKey) {
+          results[index] = cached;
+        } else {
+          missing.push(derivation);
+          missingIndexes.push(index);
+          missingCacheKeys.push(cacheKey);
+        }
+      }
+      if (missing.length > 0) {
+        const derived = this.keyDeriver.derivePrivateKeys(missing);
+        for (let index = 0; index < derived.length; index++) {
+          results[missingIndexes[index]] = derived[index];
+          this.cacheSet(missingCacheKeys[index], derived[index]);
+        }
+      }
+      return results;
+    }
+    /**
+     * Derives a symmetric key based on protocol ID, key ID, and counterparty.
+     * Caches the result for future calls with the same parameters.
+     * @param {WalletProtocol} protocolID - The protocol ID including a security level and protocol name.
+     * @param {string} keyID - The key identifier.
+     * @param {Counterparty} counterparty - The counterparty's public key or a predefined value ('self' or 'anyone').
+     * @returns {SymmetricKey} - The derived symmetric key.
+     * @throws {Error} - Throws an error if attempting to derive a symmetric key for 'anyone'.
+     */
+    deriveSymmetricKey(protocolID, keyID, counterparty) {
+      const cacheKey = this.generateCacheKey("deriveSymmetricKey", protocolID, keyID, counterparty);
+      if (this.cache.has(cacheKey)) {
+        const cachedValue = this.cacheGet(cacheKey);
+        if (cachedValue === void 0) {
+          throw new Error("Cached value is undefined");
+        }
+        return cachedValue;
+      } else {
+        const result = this.keyDeriver.deriveSymmetricKey(protocolID, keyID, counterparty);
+        this.cacheSet(cacheKey, result);
+        return result;
+      }
+    }
+    async deriveSymmetricKeyAsync(protocolID, keyID, counterparty) {
+      const cacheKey = this.generateCacheKey("deriveSymmetricKey", protocolID, keyID, counterparty);
+      const cachedValue = this.cacheGet(cacheKey);
+      if (cachedValue !== void 0)
+        return cachedValue;
+      const result = await this.keyDeriver.deriveSymmetricKeyAsync(protocolID, keyID, counterparty);
+      this.cacheSet(cacheKey, result);
+      return result;
+    }
+    /**
+     * Reveals the shared secret between the root key and the counterparty.
+     * Caches the result for future calls with the same parameters.
+     * @param {Counterparty} counterparty - The counterparty's public key or a predefined value ('self' or 'anyone').
+     * @returns {number[]} - The shared secret as a number array.
+     * @throws {Error} - Throws an error if attempting to reveal a shared secret for 'self'.
+     */
+    revealCounterpartySecret(counterparty) {
+      const cacheKey = this.generateCacheKey("revealCounterpartySecret", counterparty);
+      if (this.cache.has(cacheKey)) {
+        const cachedValue = this.cacheGet(cacheKey);
+        if (cachedValue === void 0) {
+          throw new Error("Cached value is undefined");
+        }
+        return cachedValue;
+      } else {
+        const result = this.keyDeriver.revealCounterpartySecret(counterparty);
+        this.cacheSet(cacheKey, result);
+        return result;
+      }
+    }
+    /**
+     * Reveals the specific key association for a given protocol ID, key ID, and counterparty.
+     * Caches the result for future calls with the same parameters.
+     * @param {Counterparty} counterparty - The counterparty's public key or a predefined value ('self' or 'anyone').
+     * @param {WalletProtocol} protocolID - The protocol ID including a security level and protocol name.
+     * @param {string} keyID - The key identifier.
+     * @returns {number[]} - The specific key association as a number array.
+     */
+    revealSpecificSecret(counterparty, protocolID, keyID) {
+      const cacheKey = this.generateCacheKey("revealSpecificSecret", counterparty, protocolID, keyID);
+      if (this.cache.has(cacheKey)) {
+        const cachedValue = this.cacheGet(cacheKey);
+        if (cachedValue === void 0) {
+          throw new Error("Cached value is undefined");
+        }
+        return cachedValue;
+      } else {
+        const result = this.keyDeriver.revealSpecificSecret(counterparty, protocolID, keyID);
+        this.cacheSet(cacheKey, result);
+        return result;
+      }
+    }
+    /**
+     * Generates a unique cache key based on the method name and input parameters.
+     * @param {string} methodName - The name of the method.
+     * @param {...any} args - The arguments passed to the method.
+     * @returns {string} - The generated cache key.
+     */
+    generateCacheKey(methodName, ...args) {
+      const serializedArgs = args.map((arg) => this.serializeArgument(arg)).join("|");
+      return `${methodName}|${serializedArgs}`;
+    }
+    /**
+     * Serializes an argument to a string for use in a cache key.
+     * @param {any} arg - The argument to serialize.
+     * @returns {string} - The serialized argument.
+     */
+    serializeArgument(arg) {
+      if (arg instanceof PublicKey || arg instanceof PrivateKey) {
+        return arg.toString();
+      } else if (Array.isArray(arg)) {
+        return arg.map((item) => this.serializeArgument(item)).join(",");
+      } else if (typeof arg === "object" && arg !== null) {
+        return JSON.stringify(arg);
+      } else {
+        return String(arg);
+      }
+    }
+    /**
+     * Retrieves an item from the cache and updates its position to reflect recent use.
+     * @param {string} cacheKey - The key of the cached item.
+     * @returns {any} - The cached value.
+     */
+    cacheGet(cacheKey) {
+      const value = this.cache.get(cacheKey);
+      this.cache.delete(cacheKey);
+      if (value !== void 0) {
+        this.cache.set(cacheKey, value);
+      }
+      return value;
+    }
+    /**
+     * Adds an item to the cache and evicts the least recently used item if necessary.
+     * @param {string} cacheKey - The key of the item to cache.
+     * @param {any} value - The value to cache.
+     */
+    cacheSet(cacheKey, value) {
+      if (this.cache.size >= this.maxCacheSize) {
+        const firstKey = this.cache.keys().next().value;
+        if (firstKey !== void 0)
+          this.cache.delete(firstKey);
+      }
+      this.cache.set(cacheKey, value);
+    }
+  };
+
+  // node_modules/@bsv/sdk/dist/esm/src/wallet/ProtoWallet.js
+  async function hashSignatureData(data) {
+    const subtle = globalThis.crypto?.subtle;
+    if (!Array.isArray(data) || data.length < 65536 || subtle === void 0) {
+      return Hash_exports.sha256(data);
+    }
+    const bytes2 = new Uint8Array(data);
+    try {
+      const digest = new Uint8Array(await subtle.digest("SHA-256", bytes2));
+      if (digest.length === 32)
+        return Array.from(digest);
+    } catch {
+    }
+    return Hash_exports.sha256(bytes2);
+  }
+  function keyDeriverOrThrow(keyDeriver) {
+    return keyDeriver ?? (() => {
+      throw new Error("keyDeriver is undefined");
+    })();
+  }
+  async function derivePublicKey(keyDeriver, args) {
+    const protocolID = args.protocolID;
+    const keyID = args.keyID;
+    if (protocolID == null || keyID == null) {
+      throw new Error("protocolID and keyID are required");
+    }
+    if (keyDeriver.derivePublicKeyAsync !== void 0) {
+      return await keyDeriver.derivePublicKeyAsync(protocolID, keyID, args.counterparty ?? "self", args.forSelf);
+    }
+    return keyDeriver.derivePublicKey(protocolID, keyID, args.counterparty ?? "self", args.forSelf);
+  }
+  function derivePrivateKey(keyDeriver, protocolID, keyID, counterparty) {
+    return keyDeriver.derivePrivateKey(protocolID, keyID, counterparty);
+  }
+  async function deriveSymmetricKey(keyDeriver, protocolID, keyID, counterparty) {
+    if (keyDeriver.deriveSymmetricKeyAsync !== void 0) {
+      return await keyDeriver.deriveSymmetricKeyAsync(protocolID, keyID, counterparty);
+    }
+    return keyDeriver.deriveSymmetricKey(protocolID, keyID, counterparty);
+  }
+  var ProtoWallet = class {
+    keyDeriver;
+    constructor(rootKeyOrKeyDeriver) {
+      if (typeof rootKeyOrKeyDeriver.identityKey !== "string") {
+        rootKeyOrKeyDeriver = new CachedKeyDeriver(rootKeyOrKeyDeriver);
+      }
+      this.keyDeriver = rootKeyOrKeyDeriver;
+    }
+    async getPublicKey(args) {
+      if (args.identityKey) {
+        const rootKey = keyDeriverOrThrow(this.keyDeriver).rootKey;
+        const backend = readyAsyncCryptoBackend("publicKeyFromPrivate");
+        if (backend !== void 0) {
+          const publicKey = validateAsyncCryptoBytes("publicKeyFromPrivate", await backend.publicKeyFromPrivate(Uint8Array.from(rootKey.toArray("be", 32))), 33);
+          return {
+            publicKey: PublicKey.fromDER(Array.from(publicKey)).toString()
+          };
+        }
+        return { publicKey: rootKey.toPublicKey().toString() };
+      } else {
+        if (args.protocolID == null || args.keyID == null || args.keyID === "") {
+          throw new Error("protocolID and keyID are required if identityKey is false or undefined.");
+        }
+        return {
+          publicKey: (await derivePublicKey(keyDeriverOrThrow(this.keyDeriver), args)).toString()
+        };
+      }
+    }
+    async revealCounterpartyKeyLinkage(args) {
+      const { publicKey: identityKey } = await this.getPublicKey({
+        identityKey: true
+      });
+      if (this.keyDeriver == null) {
+        throw new Error("keyDeriver is undefined");
+      }
+      const linkage = this.keyDeriver.revealCounterpartySecret(args.counterparty);
+      const linkageProof = new Schnorr().generateProof(this.keyDeriver.rootKey, this.keyDeriver.rootKey.toPublicKey(), PublicKey.fromString(args.counterparty), Point.fromDER(linkage));
+      const linkageProofBin = [
+        ...linkageProof.R.encode(true),
+        ...linkageProof.SPrime.encode(true),
+        ...linkageProof.z.toArray("be", 32)
+      ];
+      const revelationTime = (/* @__PURE__ */ new Date()).toISOString();
+      const { ciphertext: encryptedLinkage } = await this.encrypt({
+        plaintext: linkage,
+        protocolID: [2, "counterparty linkage revelation"],
+        keyID: revelationTime,
+        counterparty: args.verifier
+      });
+      const { ciphertext: encryptedLinkageProof } = await this.encrypt({
+        plaintext: linkageProofBin,
+        protocolID: [2, "counterparty linkage revelation"],
+        keyID: revelationTime,
+        counterparty: args.verifier
+      });
+      return {
+        prover: identityKey,
+        verifier: args.verifier,
+        counterparty: args.counterparty,
+        revelationTime,
+        encryptedLinkage,
+        encryptedLinkageProof
+      };
+    }
+    async revealSpecificKeyLinkage(args) {
+      const { publicKey: identityKey } = await this.getPublicKey({
+        identityKey: true
+      });
+      if (this.keyDeriver == null) {
+        throw new Error("keyDeriver is undefined");
+      }
+      const linkage = this.keyDeriver.revealSpecificSecret(args.counterparty, args.protocolID, args.keyID);
+      const { ciphertext: encryptedLinkage } = await this.encrypt({
+        plaintext: linkage,
+        protocolID: [2, `specific linkage revelation ${args.protocolID[0]} ${args.protocolID[1]}`],
+        keyID: args.keyID,
+        counterparty: args.verifier
+      });
+      const { ciphertext: encryptedLinkageProof } = await this.encrypt({
+        plaintext: [0],
+        // Proof type 0, no proof provided
+        protocolID: [2, `specific linkage revelation ${args.protocolID[0]} ${args.protocolID[1]}`],
+        keyID: args.keyID,
+        counterparty: args.verifier
+      });
+      return {
+        prover: identityKey,
+        verifier: args.verifier,
+        counterparty: args.counterparty,
+        protocolID: args.protocolID,
+        keyID: args.keyID,
+        encryptedLinkage,
+        encryptedLinkageProof,
+        proofType: 0
+      };
+    }
+    async encrypt(args) {
+      const key = await deriveSymmetricKey(keyDeriverOrThrow(this.keyDeriver), args.protocolID, args.keyID, args.counterparty ?? "self");
+      return { ciphertext: key.encrypt(args.plaintext) };
+    }
+    async decrypt(args, _originator) {
+      const key = await deriveSymmetricKey(keyDeriverOrThrow(this.keyDeriver), args.protocolID, args.keyID, args.counterparty ?? "self");
+      return { plaintext: key.decrypt(args.ciphertext) };
+    }
+    async createHmac(args) {
+      const key = await deriveSymmetricKey(keyDeriverOrThrow(this.keyDeriver), args.protocolID, args.keyID, args.counterparty ?? "self");
+      return { hmac: Hash_exports.sha256hmac(key.toArray(), args.data) };
+    }
+    async verifyHmac(args) {
+      const key = await deriveSymmetricKey(keyDeriverOrThrow(this.keyDeriver), args.protocolID, args.keyID, args.counterparty ?? "self");
+      const computed = Hash_exports.sha256hmac(key.toArray(), args.data);
+      const provided = args.hmac;
+      const valid = constantTimeEquals(toArray2(computed), toArray2(provided));
+      if (!valid) {
+        const e = new Error("HMAC is not valid");
+        e.code = "ERR_INVALID_HMAC";
+        throw e;
+      }
+      return { valid };
+    }
+    async createSignature(args) {
+      if (args.hashToDirectlySign == null && args.data == null) {
+        throw new Error("args.data or args.hashToDirectlySign must be valid");
+      }
+      const hash = args.hashToDirectlySign ?? await hashSignatureData(args.data ?? []);
+      const key = derivePrivateKey(keyDeriverOrThrow(this.keyDeriver), args.protocolID, args.keyID, args.counterparty ?? "anyone");
+      const backend = isAsyncCryptoDigest(hash) ? readyAsyncCryptoBackend("signDigest") : void 0;
+      const signature = backend === void 0 ? ECDSA_exports.sign(new BigNumber(hash), key, true) : Signature.fromDER(Array.from(validateAsyncCryptoBytes("signDigest", await backend.signDigest(Uint8Array.from(key.toArray("be", 32)), Uint8Array.from(hash)))));
+      return {
+        signature: signature.toDER()
+      };
+    }
+    async verifySignature(args) {
+      if (args.hashToDirectlyVerify == null && args.data == null) {
+        throw new Error("args.data or args.hashToDirectlyVerify must be valid");
+      }
+      const hash = args.hashToDirectlyVerify ?? await hashSignatureData(args.data ?? []);
+      const key = await derivePublicKey(keyDeriverOrThrow(this.keyDeriver), args);
+      const parsedSignature = Signature.fromDER(args.signature);
+      const backend = isAsyncCryptoDigest(hash) ? readyAsyncCryptoBackend("verifyDigest") : void 0;
+      const valid = backend === void 0 ? ECDSA_exports.verify(new BigNumber(hash), parsedSignature, key) : await backend.verifyDigest(Uint8Array.from(key.encode(true)), Uint8Array.from(hash), Uint8Array.from(parsedSignature.toDER()));
+      if (!valid) {
+        const e = new Error("Signature is not valid");
+        e.code = "ERR_INVALID_SIGNATURE";
+        throw e;
+      }
+      return { valid };
+    }
+  };
+  var ProtoWallet_default = ProtoWallet;
+
+  // node_modules/@bsv/sdk/dist/esm/src/wallet/substrates/window.CWI.js
+  var WindowCWISubstrate = class {
+    CWI;
+    constructor() {
+      if (typeof window !== "object") {
+        throw new TypeError("The window.CWI substrate requires a global window object.");
+      }
+      if (typeof window.CWI !== "object") {
+        throw new TypeError("The window.CWI interface does not appear to be bound to the window object.");
+      }
+      this.CWI = window.CWI;
+    }
+    async createAction(args, originator) {
+      return await this.CWI.createAction(args, originator);
+    }
+    async signAction(args, originator) {
+      return await this.CWI.signAction(args, originator);
+    }
+    async abortAction(args, originator) {
+      return await this.CWI.abortAction(args, originator);
+    }
+    async listActions(args, originator) {
+      return await this.CWI.listActions(args, originator);
+    }
+    async internalizeAction(args, originator) {
+      return await this.CWI.internalizeAction(args, originator);
+    }
+    async listOutputs(args, originator) {
+      return await this.CWI.listOutputs(args, originator);
+    }
+    async relinquishOutput(args, originator) {
+      return await this.CWI.relinquishOutput(args, originator);
+    }
+    async getPublicKey(args, originator) {
+      return await this.CWI.getPublicKey(args, originator);
+    }
+    async revealCounterpartyKeyLinkage(args, originator) {
+      return await this.CWI.revealCounterpartyKeyLinkage(args, originator);
+    }
+    async revealSpecificKeyLinkage(args, originator) {
+      return await this.CWI.revealSpecificKeyLinkage(args, originator);
+    }
+    async encrypt(args, originator) {
+      return await this.CWI.encrypt(args, originator);
+    }
+    async decrypt(args, originator) {
+      return await this.CWI.decrypt(args, originator);
+    }
+    async createHmac(args, originator) {
+      return await this.CWI.createHmac(args, originator);
+    }
+    async verifyHmac(args, originator) {
+      return await this.CWI.verifyHmac(args, originator);
+    }
+    async createSignature(args, originator) {
+      return await this.CWI.createSignature(args, originator);
+    }
+    async verifySignature(args, originator) {
+      return await this.CWI.verifySignature(args, originator);
+    }
+    async acquireCertificate(args, originator) {
+      return await this.CWI.acquireCertificate(args, originator);
+    }
+    async listCertificates(args, originator) {
+      return await this.CWI.listCertificates(args, originator);
+    }
+    async proveCertificate(args, originator) {
+      return await this.CWI.proveCertificate(args, originator);
+    }
+    async relinquishCertificate(args, originator) {
+      return await this.CWI.relinquishCertificate(args, originator);
+    }
+    async discoverByIdentityKey(args, originator) {
+      return await this.CWI.discoverByIdentityKey(args, originator);
+    }
+    async discoverByAttributes(args, originator) {
+      return await this.CWI.discoverByAttributes(args, originator);
+    }
+    async isAuthenticated(args, originator) {
+      return await this.CWI.isAuthenticated(args, originator);
+    }
+    async waitForAuthentication(args, originator) {
+      return await this.CWI.waitForAuthentication(args, originator);
+    }
+    async getHeight(args, originator) {
+      return await this.CWI.getHeight(args, originator);
+    }
+    async getHeaderForHeight(args, originator) {
+      return await this.CWI.getHeaderForHeight(args, originator);
+    }
+    async getNetwork(args, originator) {
+      return await this.CWI.getNetwork(args, originator);
+    }
+    async getVersion(args, originator) {
+      return await this.CWI.getVersion(args, originator);
+    }
+  };
+
+  // node_modules/@bsv/sdk/dist/esm/src/wallet/WalletError.js
+  var WalletError = class extends Error {
+    code;
+    isError = true;
+    constructor(message, code = 1, stack) {
+      super(message);
+      this.code = code;
+      this.name = this.constructor.name;
+      if (stack !== void 0 && stack !== null && stack !== "") {
+        this.stack = stack;
+      } else {
+        Error.captureStackTrace(this, this.constructor);
+      }
+    }
+    /**
+     * Safely serializes a WalletError (including special cases), Error or unknown error to JSON.
+     *
+     * Safely means avoiding deep, large, circular issues.
+     *
+     * Example deserialization can be found in HTTPWalletJSON.ts of bsv ts-sdk.
+     *
+     * @param error
+     * @returns stringified JSON representation of the error such that it can be deserialized to a WalletError.
+     */
+    static unknownToJson(error) {
+      let e;
+      if (error.isError === true && String(error.name).startsWith("WERR_")) {
+        e = {
+          name: error.name,
+          message: error.message,
+          isError: true
+        };
+        if (e.name === "WERR_REVIEW_ACTIONS") {
+          e.reviewActionResults = error.reviewActionResults;
+          e.sendWithResults = error.sendWithResults;
+          e.txid = error.txid;
+          e.tx = error.tx;
+          e.noSendChange = error.noSendChange;
+          e.code = 5;
+        } else if (e.name === "WERR_INVALID_PARAMETER") {
+          e.parameter = error.parameter;
+          e.code = 6;
+        } else if (e.name === "WERR_INSUFFICIENT_FUNDS") {
+          e.totalSatoshisNeeded = error.totalSatoshisNeeded;
+          e.moreSatoshisNeeded = error.moreSatoshisNeeded;
+          e.code = 7;
+        }
+      } else if (error instanceof Error) {
+        e = {
+          name: error.constructor.name,
+          message: error.message,
+          isError: true
+        };
+      } else {
+        e = {
+          name: "WERR_UNKNOWN",
+          message: String(error),
+          isError: true
+        };
+      }
+      const json = stringifyBRC100(e);
+      return json;
+    }
+  };
+  var walletErrors;
+  (function(walletErrors2) {
+    walletErrors2[walletErrors2["unknownError"] = 1] = "unknownError";
+    walletErrors2[walletErrors2["unsupportedAction"] = 2] = "unsupportedAction";
+    walletErrors2[walletErrors2["invalidHmac"] = 3] = "invalidHmac";
+    walletErrors2[walletErrors2["invalidSignature"] = 4] = "invalidSignature";
+    walletErrors2[walletErrors2["reviewActions"] = 5] = "reviewActions";
+    walletErrors2[walletErrors2["invalidParameter"] = 6] = "invalidParameter";
+    walletErrors2[walletErrors2["insufficientFunds"] = 7] = "insufficientFunds";
+  })(walletErrors || (walletErrors = {}));
+
+  // node_modules/@bsv/sdk/dist/esm/src/wallet/substrates/InvokableWalletBase.js
+  var InvokableWalletBase = class {
+    async createAction(args) {
+      return await this.invoke("createAction", args);
+    }
+    async signAction(args) {
+      return await this.invoke("signAction", args);
+    }
+    async abortAction(args) {
+      return await this.invoke("abortAction", args);
+    }
+    async listActions(args) {
+      return await this.invoke("listActions", args);
+    }
+    async internalizeAction(args) {
+      return await this.invoke("internalizeAction", args);
+    }
+    async listOutputs(args) {
+      return await this.invoke("listOutputs", args);
+    }
+    async relinquishOutput(args) {
+      return await this.invoke("relinquishOutput", args);
+    }
+    async getPublicKey(args) {
+      return await this.invoke("getPublicKey", args);
+    }
+    async revealCounterpartyKeyLinkage(args) {
+      return await this.invoke("revealCounterpartyKeyLinkage", args);
+    }
+    async revealSpecificKeyLinkage(args) {
+      return await this.invoke("revealSpecificKeyLinkage", args);
+    }
+    async encrypt(args) {
+      return await this.invoke("encrypt", args);
+    }
+    async decrypt(args) {
+      return await this.invoke("decrypt", args);
+    }
+    async createHmac(args) {
+      return await this.invoke("createHmac", args);
+    }
+    async verifyHmac(args) {
+      return await this.invoke("verifyHmac", args);
+    }
+    async createSignature(args) {
+      return await this.invoke("createSignature", args);
+    }
+    async verifySignature(args) {
+      return await this.invoke("verifySignature", args);
+    }
+    async acquireCertificate(args) {
+      return await this.invoke("acquireCertificate", args);
+    }
+    async listCertificates(args) {
+      return await this.invoke("listCertificates", args);
+    }
+    async proveCertificate(args) {
+      return await this.invoke("proveCertificate", args);
+    }
+    async relinquishCertificate(args) {
+      return await this.invoke("relinquishCertificate", args);
+    }
+    async discoverByIdentityKey(args) {
+      return await this.invoke("discoverByIdentityKey", args);
+    }
+    async discoverByAttributes(args) {
+      return await this.invoke("discoverByAttributes", args);
+    }
+    async isAuthenticated(args) {
+      return await this.invoke("isAuthenticated", args);
+    }
+    async waitForAuthentication(args) {
+      return await this.invoke("waitForAuthentication", args);
+    }
+    async getHeight(args) {
+      return await this.invoke("getHeight", args);
+    }
+    async getHeaderForHeight(args) {
+      return await this.invoke("getHeaderForHeight", args);
+    }
+    async getNetwork(args) {
+      return await this.invoke("getNetwork", args);
+    }
+    async getVersion(args) {
+      return await this.invoke("getVersion", args);
+    }
+  };
+
+  // node_modules/@bsv/sdk/dist/esm/src/wallet/substrates/XDM.js
+  function isCWIResponse(value, id) {
+    if (typeof value !== "object" || value === null)
+      return false;
+    const response = value;
+    if (response.type !== "CWI" || response.isInvocation !== false || response.id !== id) {
+      return false;
+    }
+    if (response.status === "success")
+      return true;
+    return response.status === "error" && typeof response.description === "string" && typeof response.code === "number" && Number.isSafeInteger(response.code);
+  }
+  var XDMSubstrate = class extends InvokableWalletBase {
+    domain;
+    constructor(domain = "*") {
+      super();
+      if (typeof globalThis.window !== "object") {
+        throw new TypeError("The XDM substrate requires a global window object.");
+      }
+      if (typeof globalThis.window.postMessage !== "function") {
+        throw new TypeError("The window object does not seem to support postMessage calls.");
+      }
+      this.domain = domain;
+    }
+    async invoke(call, args) {
+      return await new Promise((resolve, reject) => {
+        const id = toBase64(Random_default(12));
+        const listener = (e) => {
+          if (!e.isTrusted || e.source !== window.parent || this.domain !== "*" && e.origin !== this.domain || !isCWIResponse(e.data, id)) {
+            return;
+          }
+          if (typeof window.removeEventListener === "function") {
+            window.removeEventListener("message", listener);
+          }
+          if (e.data.status === "error") {
+            const err = new WalletError(e.data.description, e.data.code);
+            reject(err);
+          } else {
+            resolve(e.data.result);
+          }
+        };
+        window.addEventListener("message", listener);
+        window.parent.postMessage({
+          type: "CWI",
+          isInvocation: true,
+          id,
+          call,
+          args
+        }, this.domain);
+      });
+    }
+  };
+
+  // node_modules/@bsv/sdk/dist/esm/src/auth/certificates/Certificate.js
+  var Certificate = class _Certificate {
+    /**
+     * Type identifier for the certificate, base64 encoded string, 32 bytes.
+     */
+    type;
+    /**
+     * Unique serial number of the certificate, base64 encoded string, 32 bytes.
+     */
+    serialNumber;
+    /**
+     * The public key belonging to the certificate's subject, compressed public key hex string.
+     */
+    subject;
+    /**
+     * Public key of the certifier who issued the certificate, compressed public key hex string.
+     */
+    certifier;
+    /**
+     * The outpoint used to confirm that the certificate has not been revoked (TXID.OutputIndex), as a string.
+     */
+    revocationOutpoint;
+    /**
+     * All the fields present in the certificate, with field names as keys and encrypted field values as Base64 strings.
+     */
+    fields;
+    /**
+     * Certificate signature by the certifier's private key, DER encoded hex string.
+     */
+    signature;
+    /**
+     * Constructs a new Certificate.
+     *
+     * @param {Base64String} type - Type identifier for the certificate, base64 encoded string, 32 bytes.
+     * @param {Base64String} serialNumber - Unique serial number of the certificate, base64 encoded string, 32 bytes.
+     * @param {PubKeyHex} subject - The public key belonging to the certificate's subject, compressed public key hex string.
+     * @param {PubKeyHex} certifier - Public key of the certifier who issued the certificate, compressed public key hex string.
+     * @param {OutpointString} revocationOutpoint - The outpoint used to confirm that the certificate has not been revoked (TXID.OutputIndex), as a string.
+     * @param {Record<CertificateFieldNameUnder50Bytes, string>} fields - All the fields present in the certificate.
+     * @param {HexString} signature - Certificate signature by the certifier's private key, DER encoded hex string.
+     */
+    constructor(type, serialNumber, subject, certifier, revocationOutpoint, fields, signature) {
+      this.type = type;
+      this.serialNumber = serialNumber;
+      this.subject = subject;
+      this.certifier = certifier;
+      this.revocationOutpoint = revocationOutpoint;
+      this.fields = fields;
+      this.signature = signature;
+    }
+    /**
+     * Serializes the certificate into binary format, with or without a signature.
+     *
+     * @param {boolean} [includeSignature=true] - Whether to include the signature in the serialization.
+     * @returns {number[]} - The serialized certificate in binary format.
+     */
+    toBinary(includeSignature = true) {
+      const writer = new Writer();
+      const typeBytes = toArray2(this.type, "base64");
+      writer.write(typeBytes);
+      const serialNumberBytes = toArray2(this.serialNumber, "base64");
+      writer.write(serialNumberBytes);
+      const subjectBytes = toArray2(this.subject, "hex");
+      writer.write(subjectBytes);
+      const certifierBytes = toArray2(this.certifier, "hex");
+      writer.write(certifierBytes);
+      const [txid, outputIndex] = this.revocationOutpoint.split(".");
+      const txidBytes = toArray2(txid, "hex");
+      writer.write(txidBytes);
+      writer.writeVarIntNum(Number(outputIndex));
+      const fieldNames = Object.keys(this.fields).sort((a, b) => a.localeCompare(b));
+      writer.writeVarIntNum(fieldNames.length);
+      for (const fieldName of fieldNames) {
+        const fieldValue = this.fields[fieldName];
+        const fieldNameBytes = toArray2(fieldName, "utf8");
+        writer.writeVarIntNum(fieldNameBytes.length);
+        writer.write(fieldNameBytes);
+        const fieldValueBytes = toArray2(fieldValue, "utf8");
+        writer.writeVarIntNum(fieldValueBytes.length);
+        writer.write(fieldValueBytes);
+      }
+      if (includeSignature && (this.signature ?? "").length > 0) {
+        const signatureBytes = toArray2(this.signature, "hex");
+        writer.write(signatureBytes);
+      }
+      return writer.toArray();
+    }
+    /**
+     * Deserializes a certificate from binary format.
+     *
+     * @param {number[]} bin - The binary data representing the certificate.
+     * @returns {Certificate} - The deserialized Certificate object.
+     */
+    static fromBinary(bin) {
+      const reader = new ReaderUint8Array(bin);
+      const typeBytes = reader.read(32);
+      const type = toBase64(typeBytes);
+      const serialNumberBytes = reader.read(32);
+      const serialNumber = toBase64(serialNumberBytes);
+      const subjectBytes = reader.read(33);
+      const subject = toHex(subjectBytes);
+      const certifierBytes = reader.read(33);
+      const certifier = toHex(certifierBytes);
+      const txidBytes = reader.read(32);
+      const txid = toHex(txidBytes);
+      const outputIndex = reader.readVarIntNum();
+      const revocationOutpoint = `${txid}.${outputIndex}`;
+      const numFields = reader.readVarIntNum();
+      const fields = {};
+      for (let i = 0; i < numFields; i++) {
+        const fieldNameLength = reader.readVarIntNum();
+        const fieldNameBytes = reader.read(fieldNameLength);
+        const fieldName = toUTF8(fieldNameBytes);
+        const fieldValueLength = reader.readVarIntNum();
+        const fieldValueBytes = reader.read(fieldValueLength);
+        const fieldValue = toUTF8(fieldValueBytes);
+        fields[fieldName] = fieldValue;
+      }
+      let signature;
+      if (!reader.eof()) {
+        const signatureBytes = reader.read();
+        const sig = Signature.fromDER(Array.from(signatureBytes));
+        signature = sig.toString("hex");
+      }
+      return new _Certificate(type, serialNumber, subject, certifier, revocationOutpoint, fields, signature);
+    }
+    /**
+     * Verifies the certificate's signature.
+     *
+     * @returns {Promise<boolean>} - A promise that resolves to true if the signature is valid.
+     */
+    async verify() {
+      const verifier = new ProtoWallet_default("anyone");
+      const verificationData = this.toBinary(false);
+      const signatureHex = this.signature ?? "";
+      const { valid } = await verifier.verifySignature({
+        signature: toArray2(signatureHex, "hex"),
+        // Now it is always a string
+        data: verificationData,
+        protocolID: [2, "certificate signature"],
+        keyID: `${this.type} ${this.serialNumber}`,
+        counterparty: this.certifier
+        // The certifier is the one who signed the certificate
+      });
+      return valid;
+    }
+    /**
+    * Signs the certificate using the provided certifier wallet.
+    *
+    * @param {Wallet} certifierWallet - The wallet representing the certifier.
+    * @returns {Promise<void>}
+    */
+    async sign(certifierWallet) {
+      if (this.signature != null && this.signature.length > 0) {
+        throw new Error(`Certificate has already been signed! Signature present: ${this.signature}`);
+      }
+      this.certifier = (await certifierWallet.getPublicKey({ identityKey: true })).publicKey;
+      const preimage = this.toBinary(false);
+      const { signature } = await certifierWallet.createSignature({
+        data: preimage,
+        protocolID: [2, "certificate signature"],
+        keyID: `${this.type} ${this.serialNumber}`
+      });
+      this.signature = toHex(signature);
+    }
+    /**
+     * Helper function which retrieves the protocol ID and key ID for certificate field encryption.
+     *
+     * For master certificate creation, no serial number is provided because entropy is required
+     * from both the client and the certifier. In this case, the `keyID` is simply the `fieldName`.
+     *
+     * For VerifiableCertificates verifier keyring creation, both the serial number and field name are available,
+     * so the `keyID` is formed by concatenating the `serialNumber` and `fieldName`.
+     *
+     * @param fieldName - The name of the field within the certificate to be encrypted.
+     * @param serialNumber - (Optional) The serial number of the certificate.
+     * @returns An object containing:
+     *   - `protocolID` (WalletProtocol): The protocol ID for certificate field encryption.
+     *   - `keyID` (string): A unique key identifier. It is the `fieldName` if `serialNumber` is undefined,
+     *     otherwise it is a combination of `serialNumber` and `fieldName`.
+     */
+    static getCertificateFieldEncryptionDetails(fieldName, serialNumber) {
+      return {
+        protocolID: [2, "certificate field encryption"],
+        keyID: serialNumber ? `${serialNumber} ${fieldName}` : fieldName
+      };
+    }
+    /**
+     * Creates a Certificate instance from a plain object representation.
+     *
+     * @param obj - The object containing certificate data.
+     * @returns A new Certificate instance.
+     */
+    static fromObject(obj) {
+      const cert = new _Certificate(obj.type, obj.serialNumber, obj.subject, obj.certifier, obj.revocationOutpoint, obj.fields, obj.signature);
+      return cert;
+    }
+  };
+
+  // node_modules/@bsv/sdk/dist/esm/src/wallet/substrates/WalletWireCalls.js
+  var calls;
+  (function(calls2) {
+    calls2[calls2["createAction"] = 1] = "createAction";
+    calls2[calls2["signAction"] = 2] = "signAction";
+    calls2[calls2["abortAction"] = 3] = "abortAction";
+    calls2[calls2["listActions"] = 4] = "listActions";
+    calls2[calls2["internalizeAction"] = 5] = "internalizeAction";
+    calls2[calls2["listOutputs"] = 6] = "listOutputs";
+    calls2[calls2["relinquishOutput"] = 7] = "relinquishOutput";
+    calls2[calls2["getPublicKey"] = 8] = "getPublicKey";
+    calls2[calls2["revealCounterpartyKeyLinkage"] = 9] = "revealCounterpartyKeyLinkage";
+    calls2[calls2["revealSpecificKeyLinkage"] = 10] = "revealSpecificKeyLinkage";
+    calls2[calls2["encrypt"] = 11] = "encrypt";
+    calls2[calls2["decrypt"] = 12] = "decrypt";
+    calls2[calls2["createHmac"] = 13] = "createHmac";
+    calls2[calls2["verifyHmac"] = 14] = "verifyHmac";
+    calls2[calls2["createSignature"] = 15] = "createSignature";
+    calls2[calls2["verifySignature"] = 16] = "verifySignature";
+    calls2[calls2["acquireCertificate"] = 17] = "acquireCertificate";
+    calls2[calls2["listCertificates"] = 18] = "listCertificates";
+    calls2[calls2["proveCertificate"] = 19] = "proveCertificate";
+    calls2[calls2["relinquishCertificate"] = 20] = "relinquishCertificate";
+    calls2[calls2["discoverByIdentityKey"] = 21] = "discoverByIdentityKey";
+    calls2[calls2["discoverByAttributes"] = 22] = "discoverByAttributes";
+    calls2[calls2["isAuthenticated"] = 23] = "isAuthenticated";
+    calls2[calls2["waitForAuthentication"] = 24] = "waitForAuthentication";
+    calls2[calls2["getHeight"] = 25] = "getHeight";
+    calls2[calls2["getHeaderForHeight"] = 26] = "getHeaderForHeight";
+    calls2[calls2["getNetwork"] = 27] = "getNetwork";
+    calls2[calls2["getVersion"] = 28] = "getVersion";
+  })(calls || (calls = {}));
+  var WalletWireCalls_default = calls;
+
+  // node_modules/@bsv/sdk/dist/esm/src/wallet/substrates/WalletWireTransceiver.js
+  var ACTION_STATUS_MAP = {
+    1: "completed",
+    2: "unprocessed",
+    3: "sending",
+    4: "unproven",
+    5: "unsigned",
+    6: "nosend",
+    7: "nonfinal",
+    8: "failed"
+  };
+  var WalletWireTransceiver = class _WalletWireTransceiver {
+    wire;
+    constructor(wire) {
+      this.wire = wire;
+    }
+    async transmit(call, originator = "", params = []) {
+      const originatorArray = toUint8Array(originator, "utf8");
+      const frameWriter = new WriterUint8Array(void 0, 2 + originatorArray.length + params.length);
+      frameWriter.writeUInt8(WalletWireCalls_default[call]);
+      frameWriter.writeUInt8(originatorArray.length);
+      frameWriter.write(originatorArray);
+      if (params.length > 0) {
+        frameWriter.write(params);
+      }
+      const frame = frameWriter.toUint8ArrayZeroCopy();
+      const result = this.wire.transmitToWalletUint8Array === void 0 ? Uint8Array.from(await this.wire.transmitToWallet(Array.from(frame))) : await this.wire.transmitToWalletUint8Array(frame);
+      const resultReader = new ReaderUint8Array(result);
+      const errorByte = resultReader.readUInt8();
+      if (errorByte === 0) {
+        const resultFrame = resultReader.readView();
+        return resultFrame;
+      } else {
+        const errorMessageLength = resultReader.readVarIntNum();
+        const errorMessageBytes = resultReader.read(errorMessageLength);
+        const errorMessage = toUTF8(errorMessageBytes);
+        const stackTraceLength = resultReader.readVarIntNum();
+        const stackTraceBytes = resultReader.read(stackTraceLength);
+        const stackTrace = toUTF8(stackTraceBytes);
+        const e = new WalletError(errorMessage, errorByte, stackTrace);
+        throw e;
+      }
+    }
+    async createAction(args, originator) {
+      const paramWriter = new WriterUint8Array(void 0, Math.max(256, Math.ceil((args.inputBEEF?.length ?? 0) + (args.inputs ?? []).reduce((sum, input) => sum + (input.unlockingScript?.length ?? 0) / 2, 0) + (args.outputs ?? []).reduce((sum, output) => sum + output.lockingScript.length / 2, 0) + 4096)));
+      this.writeUTF8(paramWriter, args.description);
+      if (args.inputBEEF == null) {
+        paramWriter.writeVarIntNum(-1);
+      } else {
+        paramWriter.writeVarIntNum(args.inputBEEF.length);
+        paramWriter.write(args.inputBEEF);
+      }
+      if (args.inputs == null) {
+        paramWriter.writeVarIntNum(-1);
+      } else {
+        paramWriter.writeVarIntNum(args.inputs.length);
+        for (const input of args.inputs) {
+          this.serializeCreateActionInput(paramWriter, input);
+        }
+      }
+      if (args.outputs == null) {
+        paramWriter.writeVarIntNum(-1);
+      } else {
+        paramWriter.writeVarIntNum(args.outputs.length);
+        for (const output of args.outputs) {
+          this.serializeCreateActionOutput(paramWriter, output);
+        }
+      }
+      this.writeOptionalVarInt(paramWriter, args.lockTime);
+      this.writeOptionalVarInt(paramWriter, args.version);
+      this.writeUTF8Array(paramWriter, args.labels);
+      this.serializeCreateActionOptions(paramWriter, args.options);
+      const result = await this.transmit("createAction", originator, paramWriter.toUint8ArrayZeroCopy());
+      return this.parseCreateActionResult(result);
+    }
+    parseCreateActionResult(result) {
+      const resultReader = new ReaderUint8Array(result);
+      const response = {};
+      if (resultReader.readInt8() === 1) {
+        response.txid = toHex(resultReader.read(32));
+      }
+      if (resultReader.readInt8() === 1) {
+        response.tx = resultReader.readView(resultReader.readVarIntNum());
+      }
+      const noSendChangeLength = resultReader.readVarIntNum();
+      if (noSendChangeLength >= 0) {
+        response.noSendChange = [];
+        for (let i = 0; i < noSendChangeLength; i++) {
+          response.noSendChange.push(this.readOutpoint(resultReader));
+        }
+      }
+      const sendWithResults = this.readSendWithResults(resultReader);
+      if (sendWithResults != null)
+        response.sendWithResults = sendWithResults;
+      if (resultReader.readInt8() === 1) {
+        const tx = resultReader.readView(resultReader.readVarIntNum());
+        const referenceBytes = resultReader.read(resultReader.readVarIntNum());
+        response.signableTransaction = { tx, reference: toBase64(referenceBytes) };
+      }
+      return response;
+    }
+    async signAction(args, originator) {
+      const paramWriter = new WriterUint8Array();
+      const spendIndexes = Object.keys(args.spends);
+      paramWriter.writeVarIntNum(spendIndexes.length);
+      for (const index of spendIndexes) {
+        paramWriter.writeVarIntNum(Number(index));
+        const spend = args.spends[Number(index)];
+        const unlockingScriptBytes = toUint8Array(spend.unlockingScript, "hex");
+        paramWriter.writeVarIntNum(unlockingScriptBytes.length);
+        paramWriter.write(unlockingScriptBytes);
+        this.writeOptionalVarInt(paramWriter, spend.sequenceNumber);
+      }
+      const referenceBytes = toUint8Array(args.reference, "base64");
+      paramWriter.writeVarIntNum(referenceBytes.length);
+      paramWriter.write(referenceBytes);
+      this.serializeSignActionOptions(paramWriter, args.options);
+      const result = await this.transmit("signAction", originator, paramWriter.toUint8ArrayZeroCopy());
+      const resultReader = new ReaderUint8Array(result);
+      const response = {};
+      if (resultReader.readInt8() === 1) {
+        response.txid = toHex(resultReader.read(32));
+      }
+      if (resultReader.readInt8() === 1) {
+        response.tx = resultReader.readView(resultReader.readVarIntNum());
+      }
+      const sendWithResults = this.readSendWithResults(resultReader);
+      if (sendWithResults != null)
+        response.sendWithResults = sendWithResults;
+      return response;
+    }
+    async abortAction(args, originator) {
+      await this.transmit("abortAction", originator, toUint8Array(args.reference, "base64"));
+      return { aborted: true };
+    }
+    async listActions(args, originator) {
+      const paramWriter = new WriterUint8Array();
+      paramWriter.writeVarIntNum(args.labels.length);
+      for (const label of args.labels) {
+        this.writeUTF8(paramWriter, label);
+      }
+      if (args.labelQueryMode === "any")
+        paramWriter.writeInt8(1);
+      else if (args.labelQueryMode === "all")
+        paramWriter.writeInt8(2);
+      else
+        paramWriter.writeInt8(-1);
+      for (const option of [
+        args.includeLabels,
+        args.includeInputs,
+        args.includeInputSourceLockingScripts,
+        args.includeInputUnlockingScripts,
+        args.includeOutputs,
+        args.includeOutputLockingScripts
+      ]) {
+        this.writeOptionalBool(paramWriter, option);
+      }
+      this.writeOptionalVarInt(paramWriter, args.limit);
+      this.writeOptionalVarInt(paramWriter, args.offset);
+      this.writeOptionalBool(paramWriter, args.seekPermission);
+      const result = await this.transmit("listActions", originator, paramWriter.toUint8Array());
+      const resultReader = new ReaderUint8Array(result);
+      const totalActions = resultReader.readVarIntNum();
+      const actions = [];
+      for (let i = 0; i < totalActions; i++) {
+        actions.push(this.parseAction(resultReader));
+      }
+      return { totalActions, actions };
+    }
+    parseActionStatus(code) {
+      const status = ACTION_STATUS_MAP[code];
+      if (status == null)
+        throw new Error(`Unknown status code: ${code}`);
+      return status;
+    }
+    parseAction(reader) {
+      const txid = toHex(reader.read(32));
+      const satoshis = reader.readVarIntNum();
+      const status = this.parseActionStatus(reader.readInt8());
+      const isOutgoing = reader.readInt8() === 1;
+      const description = toUTF8(reader.read(reader.readVarIntNum()));
+      const action = { txid, satoshis, status, isOutgoing, description, version: 0, lockTime: 0 };
+      const labelsLen = reader.readVarIntNum();
+      if (labelsLen >= 0) {
+        action.labels = [];
+        for (let j = 0; j < labelsLen; j++) {
+          action.labels.push(toUTF8(reader.read(reader.readVarIntNum())));
+        }
+      }
+      action.version = reader.readVarIntNum();
+      action.lockTime = reader.readVarIntNum();
+      const inputsLen = reader.readVarIntNum();
+      if (inputsLen >= 0) {
+        action.inputs = [];
+        for (let k = 0; k < inputsLen; k++) {
+          action.inputs.push(this.parseActionInput(reader));
+        }
+      }
+      const outputsLen = reader.readVarIntNum();
+      if (outputsLen >= 0) {
+        action.outputs = [];
+        for (let l = 0; l < outputsLen; l++) {
+          action.outputs.push(this.parseActionOutput(reader));
+        }
+      }
+      return action;
+    }
+    parseActionInput(reader) {
+      const sourceOutpoint = this.readOutpoint(reader);
+      const sourceSatoshis = reader.readVarIntNum();
+      const srcLockLen = reader.readVarIntNum();
+      const sourceLockingScript = srcLockLen >= 0 ? toHex(reader.read(srcLockLen)) : void 0;
+      const unlockLen = reader.readVarIntNum();
+      const unlockingScript = unlockLen >= 0 ? toHex(reader.read(unlockLen)) : void 0;
+      const inputDescription = toUTF8(reader.read(reader.readVarIntNum()));
+      const sequenceNumber = reader.readVarIntNum();
+      return {
+        sourceOutpoint,
+        sourceSatoshis,
+        sourceLockingScript,
+        unlockingScript,
+        inputDescription,
+        sequenceNumber
+      };
+    }
+    parseActionOutput(reader) {
+      const outputIndex = reader.readVarIntNum();
+      const satoshis = reader.readVarIntNum();
+      const lockLen = reader.readVarIntNum();
+      const lockingScript = lockLen >= 0 ? toHex(reader.read(lockLen)) : void 0;
+      const spendable = reader.readInt8() === 1;
+      const outputDescription = toUTF8(reader.read(reader.readVarIntNum()));
+      const basketLen = reader.readVarIntNum();
+      const basket = basketLen >= 0 ? toUTF8(reader.read(basketLen)) : void 0;
+      const tagsLen = reader.readVarIntNum();
+      const tags = [];
+      if (tagsLen >= 0) {
+        for (let m = 0; m < tagsLen; m++) {
+          tags.push(toUTF8(reader.read(reader.readVarIntNum())));
+        }
+      }
+      const custLen = reader.readVarIntNum();
+      const customInstructions = custLen >= 0 ? toUTF8(reader.read(custLen)) : void 0;
+      return {
+        outputIndex,
+        satoshis,
+        lockingScript,
+        spendable,
+        outputDescription,
+        basket,
+        tags,
+        customInstructions
+      };
+    }
+    async internalizeAction(args, originator) {
+      const paramWriter = new WriterUint8Array(void 0, Math.max(256, args.tx.length + 4096));
+      paramWriter.writeVarIntNum(args.tx.length);
+      paramWriter.write(args.tx);
+      paramWriter.writeVarIntNum(args.outputs.length);
+      for (const out of args.outputs) {
+        this.serializeInternalizeOutput(paramWriter, out);
+      }
+      this.writeUTF8Array(paramWriter, typeof args.labels === "object" ? args.labels : void 0);
+      const descriptionAsArray = toUint8Array(args.description);
+      paramWriter.writeVarIntNum(descriptionAsArray.length);
+      paramWriter.write(descriptionAsArray);
+      this.writeOptionalBool(paramWriter, args.seekPermission);
+      await this.transmit("internalizeAction", originator, paramWriter.toUint8ArrayZeroCopy());
+      return { accepted: true };
+    }
+    serializeInternalizeOutput(writer, out) {
+      writer.writeVarIntNum(out.outputIndex);
+      if (out.protocol === "wallet payment") {
+        if (out.paymentRemittance == null) {
+          throw new Error("Payment remittance is required for wallet payment");
+        }
+        writer.writeUInt8(1);
+        writer.write(toUint8Array(out.paymentRemittance.senderIdentityKey, "hex"));
+        const prefix = toUint8Array(out.paymentRemittance.derivationPrefix, "base64");
+        writer.writeVarIntNum(prefix.length);
+        writer.write(prefix);
+        const suffix = toUint8Array(out.paymentRemittance.derivationSuffix, "base64");
+        writer.writeVarIntNum(suffix.length);
+        writer.write(suffix);
+      } else {
+        writer.writeUInt8(2);
+        const basket = toUint8Array(out.insertionRemittance?.basket, "utf8");
+        writer.writeVarIntNum(basket.length);
+        writer.write(basket);
+        this.writeOptionalUTF8(writer, out.insertionRemittance?.customInstructions);
+        const tags = out.insertionRemittance?.tags;
+        if (typeof tags === "object") {
+          writer.writeVarIntNum(tags.length);
+          for (const tag of tags) {
+            const t = toUint8Array(tag, "utf8");
+            writer.writeVarIntNum(t.length);
+            writer.write(t);
+          }
+        } else {
+          writer.writeVarIntNum(0);
+        }
+      }
+    }
+    async listOutputs(args, originator) {
+      const paramWriter = new WriterUint8Array();
+      this.writeUTF8(paramWriter, args.basket);
+      if (typeof args.tags === "object") {
+        paramWriter.writeVarIntNum(args.tags.length);
+        for (const tag of args.tags) {
+          this.writeUTF8(paramWriter, tag);
+        }
+      } else {
+        paramWriter.writeVarIntNum(0);
+      }
+      if (args.tagQueryMode === "all")
+        paramWriter.writeInt8(1);
+      else if (args.tagQueryMode === "any")
+        paramWriter.writeInt8(2);
+      else
+        paramWriter.writeInt8(-1);
+      if (args.include === "locking scripts")
+        paramWriter.writeInt8(1);
+      else if (args.include === "entire transactions")
+        paramWriter.writeInt8(2);
+      else
+        paramWriter.writeInt8(-1);
+      this.writeOptionalBool(paramWriter, args.includeCustomInstructions);
+      this.writeOptionalBool(paramWriter, args.includeTags);
+      this.writeOptionalBool(paramWriter, args.includeLabels);
+      this.writeOptionalVarInt(paramWriter, args.limit);
+      this.writeOptionalVarInt(paramWriter, args.offset);
+      this.writeOptionalBool(paramWriter, args.seekPermission);
+      const result = await this.transmit("listOutputs", originator, paramWriter.toUint8Array());
+      const resultReader = new ReaderUint8Array(result);
+      const totalOutputs = resultReader.readVarIntNum();
+      const beefLength = resultReader.readVarIntNum();
+      const BEEF = beefLength >= 0 ? resultReader.readView(beefLength) : void 0;
+      const outputs = [];
+      for (let i = 0; i < totalOutputs; i++) {
+        outputs.push(this.parseListOutputEntry(resultReader));
+      }
+      return { totalOutputs, BEEF, outputs };
+    }
+    parseListOutputEntry(reader) {
+      const outpoint = this.readOutpoint(reader);
+      const satoshis = reader.readVarIntNum();
+      const output = { spendable: true, outpoint, satoshis };
+      const scriptLen = reader.readVarIntNum();
+      if (scriptLen >= 0)
+        output.lockingScript = toHex(reader.read(scriptLen));
+      const custLen = reader.readVarIntNum();
+      if (custLen >= 0)
+        output.customInstructions = toUTF8(reader.read(custLen));
+      const tagsLen = reader.readVarIntNum();
+      if (tagsLen !== -1) {
+        const tags = [];
+        for (let i = 0; i < tagsLen; i++) {
+          tags.push(toUTF8(reader.read(reader.readVarIntNum())));
+        }
+        output.tags = tags;
+      }
+      const labelsLen = reader.readVarIntNum();
+      if (labelsLen !== -1) {
+        const labels = [];
+        for (let i = 0; i < labelsLen; i++) {
+          labels.push(toUTF8(reader.read(reader.readVarIntNum())));
+        }
+        output.labels = labels;
+      }
+      return output;
+    }
+    async relinquishOutput(args, originator) {
+      const paramWriter = new WriterUint8Array();
+      const basketAsArray = toUint8Array(args.basket, "utf8");
+      paramWriter.writeVarIntNum(basketAsArray.length);
+      paramWriter.write(basketAsArray);
+      paramWriter.write(this.encodeOutpoint(args.output));
+      await this.transmit("relinquishOutput", originator, paramWriter.toUint8Array());
+      return { relinquished: true };
+    }
+    encodeOutpoint(outpoint) {
+      const writer = new WriterUint8Array();
+      const [txid, index] = outpoint.split(".");
+      writer.write(toUint8Array(txid, "hex"));
+      writer.writeVarIntNum(Number(index));
+      return writer.toUint8Array();
+    }
+    readOutpoint(reader) {
+      const txid = toHex(reader.read(32));
+      const index = reader.readVarIntNum();
+      return `${txid}.${index}`;
+    }
+    async getPublicKey(args, originator) {
+      const paramWriter = new WriterUint8Array();
+      paramWriter.writeUInt8(args.identityKey ? 1 : 0);
+      if (args.identityKey) {
+        paramWriter.write(this.encodePrivilegedParams(args.privileged, args.privilegedReason));
+      } else {
+        args.protocolID ??= [SecurityLevels.Silent, "default"];
+        args.keyID ??= "";
+        paramWriter.write(this.encodeKeyRelatedParams(args.protocolID, args.keyID, args.counterparty, args.privileged, args.privilegedReason));
+        if (typeof args.forSelf === "boolean") {
+          paramWriter.writeInt8(args.forSelf ? 1 : 0);
+        } else {
+          paramWriter.writeInt8(-1);
+        }
+      }
+      this.writeOptionalBool(paramWriter, args.seekPermission);
+      const result = await this.transmit("getPublicKey", originator, paramWriter.toUint8Array());
+      return {
+        publicKey: toHex(result)
+      };
+    }
+    async revealCounterpartyKeyLinkage(args, originator) {
+      const paramWriter = new WriterUint8Array();
+      paramWriter.write(this.encodePrivilegedParams(args.privileged, args.privilegedReason));
+      paramWriter.write(toUint8Array(args.counterparty, "hex"));
+      paramWriter.write(toUint8Array(args.verifier, "hex"));
+      const result = await this.transmit("revealCounterpartyKeyLinkage", originator, paramWriter.toUint8Array());
+      const resultReader = new ReaderUint8Array(result);
+      const prover = toHex(resultReader.read(33));
+      const verifier = toHex(resultReader.read(33));
+      const counterparty = toHex(resultReader.read(33));
+      const revelationTimeLength = resultReader.readVarIntNum();
+      const revelationTime = toUTF8(resultReader.read(revelationTimeLength));
+      const encryptedLinkageLength = resultReader.readVarIntNum();
+      const encryptedLinkage = resultReader.read(encryptedLinkageLength);
+      const encryptedLinkageProofLength = resultReader.readVarIntNum();
+      const encryptedLinkageProof = resultReader.read(encryptedLinkageProofLength);
+      return {
+        prover,
+        verifier,
+        counterparty,
+        revelationTime,
+        encryptedLinkage: Array.from(encryptedLinkage),
+        encryptedLinkageProof: Array.from(encryptedLinkageProof)
+      };
+    }
+    async revealSpecificKeyLinkage(args, originator) {
+      const paramWriter = new WriterUint8Array();
+      paramWriter.write(this.encodeKeyRelatedParams(args.protocolID, args.keyID, args.counterparty, args.privileged, args.privilegedReason));
+      paramWriter.write(toUint8Array(args.verifier, "hex"));
+      const result = await this.transmit("revealSpecificKeyLinkage", originator, paramWriter.toUint8Array());
+      const resultReader = new ReaderUint8Array(result);
+      const prover = toHex(resultReader.read(33));
+      const verifier = toHex(resultReader.read(33));
+      const counterparty = toHex(resultReader.read(33));
+      const securityLevel = resultReader.readUInt8();
+      const protocolLength = resultReader.readVarIntNum();
+      const protocol = toUTF8(resultReader.read(protocolLength));
+      const keyIDLength = resultReader.readVarIntNum();
+      const keyID = toUTF8(resultReader.read(keyIDLength));
+      const encryptedLinkageLength = resultReader.readVarIntNum();
+      const encryptedLinkage = resultReader.read(encryptedLinkageLength);
+      const encryptedLinkageProofLength = resultReader.readVarIntNum();
+      const encryptedLinkageProof = resultReader.read(encryptedLinkageProofLength);
+      const proofType = resultReader.readUInt8();
+      return {
+        prover,
+        verifier,
+        counterparty,
+        protocolID: [securityLevel, protocol],
+        keyID,
+        encryptedLinkage: Array.from(encryptedLinkage),
+        encryptedLinkageProof: Array.from(encryptedLinkageProof),
+        proofType
+      };
+    }
+    async encrypt(args, originator) {
+      const paramWriter = new WriterUint8Array();
+      paramWriter.write(this.encodeKeyRelatedParams(args.protocolID, args.keyID, args.counterparty, args.privileged, args.privilegedReason));
+      paramWriter.writeVarIntNum(args.plaintext.length);
+      paramWriter.write(args.plaintext);
+      this.writeOptionalBool(paramWriter, args.seekPermission);
+      return {
+        ciphertext: Array.from(await this.transmit("encrypt", originator, paramWriter.toUint8Array()))
+      };
+    }
+    async decrypt(args, originator) {
+      const paramWriter = new WriterUint8Array();
+      paramWriter.write(this.encodeKeyRelatedParams(args.protocolID, args.keyID, args.counterparty, args.privileged, args.privilegedReason));
+      paramWriter.writeVarIntNum(args.ciphertext.length);
+      paramWriter.write(args.ciphertext);
+      this.writeOptionalBool(paramWriter, args.seekPermission);
+      return {
+        plaintext: Array.from(await this.transmit("decrypt", originator, paramWriter.toUint8Array()))
+      };
+    }
+    async createHmac(args, originator) {
+      const paramWriter = new WriterUint8Array();
+      paramWriter.write(this.encodeKeyRelatedParams(args.protocolID, args.keyID, args.counterparty, args.privileged, args.privilegedReason));
+      paramWriter.writeVarIntNum(args.data.length);
+      paramWriter.write(args.data);
+      this.writeOptionalBool(paramWriter, args.seekPermission);
+      return {
+        hmac: Array.from(await this.transmit("createHmac", originator, paramWriter.toUint8Array()))
+      };
+    }
+    async verifyHmac(args, originator) {
+      const paramWriter = new WriterUint8Array();
+      paramWriter.write(this.encodeKeyRelatedParams(args.protocolID, args.keyID, args.counterparty, args.privileged, args.privilegedReason));
+      paramWriter.write(args.hmac);
+      paramWriter.writeVarIntNum(args.data.length);
+      paramWriter.write(args.data);
+      this.writeOptionalBool(paramWriter, args.seekPermission);
+      await this.transmit("verifyHmac", originator, paramWriter.toUint8Array());
+      return { valid: true };
+    }
+    async createSignature(args, originator) {
+      const paramWriter = new WriterUint8Array();
+      paramWriter.write(this.encodeKeyRelatedParams(args.protocolID, args.keyID, args.counterparty, args.privileged, args.privilegedReason));
+      if (typeof args.data === "object") {
+        paramWriter.writeUInt8(1);
+        paramWriter.writeVarIntNum(args.data.length);
+        paramWriter.write(args.data);
+      } else {
+        args.hashToDirectlySign ??= [];
+        paramWriter.writeUInt8(2);
+        paramWriter.write(args.hashToDirectlySign);
+      }
+      this.writeOptionalBool(paramWriter, args.seekPermission);
+      return {
+        signature: Array.from(await this.transmit("createSignature", originator, paramWriter.toUint8Array()))
+      };
+    }
+    async verifySignature(args, originator) {
+      const paramWriter = new WriterUint8Array();
+      paramWriter.write(this.encodeKeyRelatedParams(args.protocolID, args.keyID, args.counterparty, args.privileged, args.privilegedReason));
+      if (typeof args.forSelf === "boolean") {
+        paramWriter.writeInt8(args.forSelf ? 1 : 0);
+      } else {
+        paramWriter.writeInt8(-1);
+      }
+      paramWriter.writeVarIntNum(args.signature.length);
+      paramWriter.write(args.signature);
+      if (typeof args.data === "object") {
+        paramWriter.writeUInt8(1);
+        paramWriter.writeVarIntNum(args.data.length);
+        paramWriter.write(args.data);
+      } else {
+        paramWriter.writeUInt8(2);
+        paramWriter.write(args.hashToDirectlyVerify ?? []);
+      }
+      this.writeOptionalBool(paramWriter, args.seekPermission);
+      await this.transmit("verifySignature", originator, paramWriter.toUint8Array());
+      return { valid: true };
+    }
+    static OPTIONAL_BOOLEAN_WIRE_VALUES = /* @__PURE__ */ new Map([
+      [true, 1],
+      [false, 0],
+      [void 0, -1]
+    ]);
+    /** Writes an optional boolean as Int8: 1/0 if present, -1 if absent. */
+    writeOptionalBool(writer, val) {
+      writer.writeInt8(_WalletWireTransceiver.OPTIONAL_BOOLEAN_WIRE_VALUES.get(val));
+    }
+    /** Writes an optional number as VarInt: the value if present, -1 if absent. */
+    writeOptionalVarInt(writer, val) {
+      if (typeof val === "number") {
+        writer.writeVarIntNum(val);
+      } else {
+        writer.writeVarIntNum(-1);
+      }
+    }
+    /** Writes a UTF-8 string as (VarInt length, bytes). */
+    writeUTF8(writer, val) {
+      const bytes2 = toUint8Array(val ?? "", "utf8");
+      writer.writeVarIntNum(bytes2.length);
+      writer.write(bytes2);
+    }
+    /** Writes an optional UTF-8 string: (VarInt length, bytes) if non-empty, -1 if absent/empty. */
+    writeOptionalUTF8(writer, val) {
+      if (val != null && val !== "") {
+        const bytes2 = toUint8Array(val, "utf8");
+        writer.writeVarIntNum(bytes2.length);
+        writer.write(bytes2);
+      } else {
+        writer.writeVarIntNum(-1);
+      }
+    }
+    /** Writes an array of UTF-8 strings as (VarInt count, ...items). -1 if null. */
+    writeUTF8Array(writer, arr) {
+      if (arr == null) {
+        writer.writeVarIntNum(-1);
+      } else {
+        writer.writeVarIntNum(arr.length);
+        for (const item of arr) {
+          const bytes2 = toUint8Array(item, "utf8");
+          writer.writeVarIntNum(bytes2.length);
+          writer.write(bytes2);
+        }
+      }
+    }
+    /** Writes an array of hex-encoded txids (each 32 bytes) as (VarInt count, ...items). -1 if null. */
+    writeTxidArray(writer, arr) {
+      if (arr == null) {
+        writer.writeVarIntNum(-1);
+      } else {
+        writer.writeVarIntNum(arr.length);
+        for (const txid of arr) {
+          writer.write(toUint8Array(txid, "hex"));
+        }
+      }
+    }
+    /** Reads a list of SendWithResults entries from a binary reader. */
+    readSendWithResults(reader) {
+      const len = reader.readVarIntNum();
+      if (len < 0)
+        return void 0;
+      const results = [];
+      for (let i = 0; i < len; i++) {
+        const txid = toHex(reader.read(32));
+        const code = reader.readInt8();
+        let status = "unproven";
+        if (code === 2) {
+          status = "sending";
+        } else if (code === 3) {
+          status = "failed";
+        }
+        results.push({ txid, status });
+      }
+      return results;
+    }
+    /** Serializes a single createAction input to the writer. */
+    serializeCreateActionInput(writer, input) {
+      writer.write(this.encodeOutpoint(input.outpoint));
+      if (input.unlockingScript != null && input.unlockingScript !== "") {
+        const bytes2 = toUint8Array(input.unlockingScript, "hex");
+        writer.writeVarIntNum(bytes2.length);
+        writer.write(bytes2);
+      } else {
+        writer.writeVarIntNum(-1);
+        writer.writeVarIntNum(input.unlockingScriptLength ?? 0);
+      }
+      this.writeUTF8(writer, input.inputDescription);
+      this.writeOptionalVarInt(writer, input.sequenceNumber);
+    }
+    /** Serializes a single createAction output to the writer. */
+    serializeCreateActionOutput(writer, output) {
+      const lockingBytes = toUint8Array(output.lockingScript, "hex");
+      writer.writeVarIntNum(lockingBytes.length);
+      writer.write(lockingBytes);
+      writer.writeVarIntNum(output.satoshis);
+      this.writeUTF8(writer, output.outputDescription);
+      this.writeOptionalUTF8(writer, output.basket);
+      this.writeOptionalUTF8(writer, output.customInstructions);
+      this.writeUTF8Array(writer, output.tags);
+    }
+    /** Serializes createAction options to the writer (Int8 presence byte + fields). */
+    serializeCreateActionOptions(writer, options) {
+      if (options == null) {
+        writer.writeInt8(0);
+        return;
+      }
+      writer.writeInt8(1);
+      this.writeOptionalBool(writer, options.signAndProcess);
+      this.writeOptionalBool(writer, options.acceptDelayedBroadcast);
+      writer.writeInt8(options.trustSelf === "known" ? 1 : -1);
+      this.writeTxidArray(writer, options.knownTxids);
+      this.writeOptionalBool(writer, options.returnTXIDOnly);
+      this.writeOptionalBool(writer, options.noSend);
+      if (options.noSendChange == null) {
+        writer.writeVarIntNum(-1);
+      } else {
+        writer.writeVarIntNum(options.noSendChange.length);
+        for (const outpoint of options.noSendChange) {
+          writer.write(this.encodeOutpoint(outpoint));
+        }
+      }
+      this.writeTxidArray(writer, options.sendWith);
+      this.writeOptionalBool(writer, options.randomizeOutputs);
+    }
+    /** Serializes signAction options to the writer (Int8 presence byte + fields). */
+    serializeSignActionOptions(writer, options) {
+      if (options == null) {
+        writer.writeInt8(0);
+        return;
+      }
+      writer.writeInt8(1);
+      this.writeOptionalBool(writer, options.acceptDelayedBroadcast);
+      this.writeOptionalBool(writer, options.returnTXIDOnly);
+      this.writeOptionalBool(writer, options.noSend);
+      this.writeTxidArray(writer, options.sendWith);
+    }
+    encodeKeyRelatedParams(protocolID, keyID, counterparty, privileged, privilegedReason) {
+      const paramWriter = new WriterUint8Array();
+      paramWriter.writeUInt8(protocolID[0]);
+      const protocolAsArray = toUint8Array(protocolID[1], "utf8");
+      paramWriter.writeVarIntNum(protocolAsArray.length);
+      paramWriter.write(protocolAsArray);
+      const keyIDAsArray = toUint8Array(keyID, "utf8");
+      paramWriter.writeVarIntNum(keyIDAsArray.length);
+      paramWriter.write(keyIDAsArray);
+      if (typeof counterparty !== "string") {
+        paramWriter.writeUInt8(0);
+      } else if (counterparty === "self") {
+        paramWriter.writeUInt8(11);
+      } else if (counterparty === "anyone") {
+        paramWriter.writeUInt8(12);
+      } else {
+        paramWriter.write(toUint8Array(counterparty, "hex"));
+      }
+      paramWriter.write(this.encodePrivilegedParams(privileged, privilegedReason));
+      return paramWriter.toUint8Array();
+    }
+    async acquireCertificate(args, originator) {
+      const paramWriter = new WriterUint8Array();
+      paramWriter.write(toUint8Array(args.type, "base64"));
+      paramWriter.write(toUint8Array(args.certifier, "hex"));
+      const fieldEntries = Object.entries(args.fields);
+      paramWriter.writeVarIntNum(fieldEntries.length);
+      for (const [key, value] of fieldEntries) {
+        const keyAsArray = toUint8Array(key, "utf8");
+        const valueAsArray = toUint8Array(value, "utf8");
+        paramWriter.writeVarIntNum(keyAsArray.length);
+        paramWriter.write(keyAsArray);
+        paramWriter.writeVarIntNum(valueAsArray.length);
+        paramWriter.write(valueAsArray);
+      }
+      paramWriter.write(this.encodePrivilegedParams(args.privileged, args.privilegedReason));
+      paramWriter.writeUInt8(args.acquisitionProtocol === "direct" ? 1 : 2);
+      if (args.acquisitionProtocol === "direct") {
+        paramWriter.write(toUint8Array(args.serialNumber, "base64"));
+        paramWriter.write(this.encodeOutpoint(args.revocationOutpoint ?? ""));
+        const signatureAsArray = toUint8Array(args.signature, "hex");
+        paramWriter.writeVarIntNum(signatureAsArray.length);
+        paramWriter.write(signatureAsArray);
+        const keyringRevealerAsArray = args.keyringRevealer === "certifier" ? [11] : toUint8Array(args.keyringRevealer, "hex");
+        paramWriter.write(keyringRevealerAsArray);
+        const keyringKeys = Object.keys(args.keyringForSubject ?? {});
+        paramWriter.writeVarIntNum(keyringKeys.length);
+        for (const key of keyringKeys) {
+          const keyringKeysAsArray = toUint8Array(key, "utf8");
+          paramWriter.writeVarIntNum(keyringKeysAsArray.length);
+          paramWriter.write(keyringKeysAsArray);
+          const keyringForSubjectAsArray = toUint8Array(args.keyringForSubject?.[key], "base64");
+          paramWriter.writeVarIntNum(keyringForSubjectAsArray.length);
+          paramWriter.write(keyringForSubjectAsArray);
+        }
+      } else {
+        const certifierUrlAsArray = toUint8Array(args.certifierUrl, "utf8");
+        paramWriter.writeVarIntNum(certifierUrlAsArray.length);
+        paramWriter.write(certifierUrlAsArray);
+      }
+      const result = await this.transmit("acquireCertificate", originator, paramWriter.toUint8Array());
+      const cert = Certificate.fromBinary(result);
+      return {
+        ...cert,
+        signature: cert.signature
+      };
+    }
+    encodePrivilegedParams(privileged, privilegedReason) {
+      const paramWriter = new WriterUint8Array();
+      if (typeof privileged === "boolean") {
+        paramWriter.writeInt8(privileged ? 1 : 0);
+      } else {
+        paramWriter.writeInt8(-1);
+      }
+      if (typeof privilegedReason === "string") {
+        const privilegedReasonAsArray = toUint8Array(privilegedReason, "utf8");
+        paramWriter.writeInt8(privilegedReasonAsArray.length);
+        paramWriter.write(privilegedReasonAsArray);
+      } else {
+        paramWriter.writeInt8(-1);
+      }
+      return paramWriter.toUint8Array();
+    }
+    async listCertificates(args, originator) {
+      const paramWriter = new WriterUint8Array();
+      paramWriter.writeVarIntNum(args.certifiers.length);
+      for (const certifier of args.certifiers) {
+        paramWriter.write(toUint8Array(certifier, "hex"));
+      }
+      paramWriter.writeVarIntNum(args.types.length);
+      for (const type of args.types) {
+        paramWriter.write(toUint8Array(type, "base64"));
+      }
+      if (typeof args.limit === "number") {
+        paramWriter.writeVarIntNum(args.limit);
+      } else {
+        paramWriter.writeVarIntNum(-1);
+      }
+      if (typeof args.offset === "number") {
+        paramWriter.writeVarIntNum(args.offset);
+      } else {
+        paramWriter.writeVarIntNum(-1);
+      }
+      paramWriter.write(this.encodePrivilegedParams(args.privileged, args.privilegedReason));
+      const result = await this.transmit("listCertificates", originator, paramWriter.toUint8Array());
+      const resultReader = new ReaderUint8Array(result);
+      const totalCertificates = resultReader.readVarIntNum();
+      const certificates = [];
+      for (let i = 0; i < totalCertificates; i++) {
+        const certificateLength = resultReader.readVarIntNum();
+        const certificateBin = resultReader.read(certificateLength);
+        const cert = Certificate.fromBinary(certificateBin);
+        const keyringForVerifier = {};
+        if (resultReader.readInt8() === 1) {
+          const numFields = resultReader.readVarIntNum();
+          for (let i2 = 0; i2 < numFields; i2++) {
+            const fieldKeyLength = resultReader.readVarIntNum();
+            const fieldKey = toUTF8(resultReader.read(fieldKeyLength));
+            const fieldValueLength = resultReader.readVarIntNum();
+            keyringForVerifier[fieldKey] = toBase64(resultReader.read(fieldValueLength));
+          }
+        }
+        const verifierLength = resultReader.readVarIntNum();
+        let verifier;
+        if (verifierLength > 0) {
+          verifier = toUTF8(resultReader.read(verifierLength));
+        }
+        certificates.push({
+          ...cert,
+          signature: cert.signature,
+          keyring: keyringForVerifier,
+          verifier
+        });
+      }
+      return {
+        totalCertificates,
+        certificates
+      };
+    }
+    async proveCertificate(args, originator) {
+      const paramWriter = new WriterUint8Array();
+      const typeAsArray = toUint8Array(args.certificate.type, "base64");
+      paramWriter.write(typeAsArray);
+      const subjectAsArray = toUint8Array(args.certificate.subject, "hex");
+      paramWriter.write(subjectAsArray);
+      const serialNumberAsArray = toUint8Array(args.certificate.serialNumber, "base64");
+      paramWriter.write(serialNumberAsArray);
+      const certifierAsArray = toUint8Array(args.certificate.certifier, "hex");
+      paramWriter.write(certifierAsArray);
+      const revocationOutpointAsArray = this.encodeOutpoint(args.certificate.revocationOutpoint ?? "");
+      paramWriter.write(revocationOutpointAsArray);
+      const signatureAsArray = toUint8Array(args.certificate.signature, "hex");
+      paramWriter.writeVarIntNum(signatureAsArray.length);
+      paramWriter.write(signatureAsArray);
+      const fieldEntries = Object.entries(args.certificate.fields ?? {});
+      paramWriter.writeVarIntNum(fieldEntries.length);
+      for (const [key, value] of fieldEntries) {
+        const keyAsArray = toUint8Array(key, "utf8");
+        const valueAsArray = toUint8Array(value, "utf8");
+        paramWriter.writeVarIntNum(keyAsArray.length);
+        paramWriter.write(keyAsArray);
+        paramWriter.writeVarIntNum(valueAsArray.length);
+        paramWriter.write(valueAsArray);
+      }
+      paramWriter.writeVarIntNum(args.fieldsToReveal.length);
+      for (const field of args.fieldsToReveal) {
+        const fieldAsArray = toUint8Array(field, "utf8");
+        paramWriter.writeVarIntNum(fieldAsArray.length);
+        paramWriter.write(fieldAsArray);
+      }
+      paramWriter.write(toUint8Array(args.verifier, "hex"));
+      paramWriter.write(this.encodePrivilegedParams(args.privileged, args.privilegedReason));
+      const result = await this.transmit("proveCertificate", originator, paramWriter.toUint8Array());
+      const resultReader = new ReaderUint8Array(result);
+      const numFields = resultReader.readVarIntNum();
+      const keyringForVerifier = {};
+      for (let i = 0; i < numFields; i++) {
+        const fieldKeyLength = resultReader.readVarIntNum();
+        const fieldKey = toUTF8(resultReader.read(fieldKeyLength));
+        const fieldValueLength = resultReader.readVarIntNum();
+        keyringForVerifier[fieldKey] = toBase64(resultReader.read(fieldValueLength));
+      }
+      return {
+        keyringForVerifier
+      };
+    }
+    async relinquishCertificate(args, originator) {
+      const paramWriter = new WriterUint8Array();
+      const typeAsArray = toUint8Array(args.type, "base64");
+      paramWriter.write(typeAsArray);
+      const serialNumberAsArray = toUint8Array(args.serialNumber, "base64");
+      paramWriter.write(serialNumberAsArray);
+      const certifierAsArray = toUint8Array(args.certifier, "hex");
+      paramWriter.write(certifierAsArray);
+      await this.transmit("relinquishCertificate", originator, paramWriter.toUint8Array());
+      return { relinquished: true };
+    }
+    parseDiscoveryResult(result) {
+      const resultReader = new ReaderUint8Array(result);
+      const totalCertificates = resultReader.readVarIntNum();
+      const certificates = [];
+      for (let i = 0; i < totalCertificates; i++) {
+        const certBinLen = resultReader.readVarIntNum();
+        const certBin = resultReader.read(certBinLen);
+        const cert = Certificate.fromBinary(certBin);
+        const nameLength = resultReader.readVarIntNum();
+        const name = toUTF8(resultReader.read(nameLength));
+        const iconUrlLength = resultReader.readVarIntNum();
+        const iconUrl = toUTF8(resultReader.read(iconUrlLength));
+        const descriptionLength = resultReader.readVarIntNum();
+        const description = toUTF8(resultReader.read(descriptionLength));
+        const trust = resultReader.readUInt8();
+        const publiclyRevealedKeyring = {};
+        const numPublicKeyringEntries = resultReader.readVarIntNum();
+        for (let j = 0; j < numPublicKeyringEntries; j++) {
+          const fieldKeyLen = resultReader.readVarIntNum();
+          const fieldKey = toUTF8(resultReader.read(fieldKeyLen));
+          const fieldValueLen = resultReader.readVarIntNum();
+          publiclyRevealedKeyring[fieldKey] = resultReader.read(fieldValueLen);
+        }
+        const decryptedFields = {};
+        const numDecryptedFields = resultReader.readVarIntNum();
+        for (let k = 0; k < numDecryptedFields; k++) {
+          const fieldKeyLen = resultReader.readVarIntNum();
+          const fieldKey = toUTF8(resultReader.read(fieldKeyLen));
+          const fieldValueLen = resultReader.readVarIntNum();
+          decryptedFields[fieldKey] = toUTF8(resultReader.read(fieldValueLen));
+        }
+        certificates.push({
+          ...cert,
+          signature: cert.signature,
+          certifierInfo: { iconUrl, name, description, trust },
+          publiclyRevealedKeyring,
+          decryptedFields
+        });
+      }
+      return {
+        totalCertificates,
+        certificates
+      };
+    }
+    async discoverByIdentityKey(args, originator) {
+      const paramWriter = new WriterUint8Array();
+      paramWriter.write(toUint8Array(args.identityKey, "hex"));
+      if (typeof args.limit === "number") {
+        paramWriter.writeVarIntNum(args.limit);
+      } else {
+        paramWriter.writeVarIntNum(-1);
+      }
+      if (typeof args.offset === "number") {
+        paramWriter.writeVarIntNum(args.offset);
+      } else {
+        paramWriter.writeVarIntNum(-1);
+      }
+      this.writeOptionalBool(paramWriter, args.seekPermission);
+      const result = await this.transmit("discoverByIdentityKey", originator, paramWriter.toUint8Array());
+      return this.parseDiscoveryResult(result);
+    }
+    async discoverByAttributes(args, originator) {
+      const paramWriter = new WriterUint8Array();
+      const attributeKeys = Object.keys(args.attributes);
+      paramWriter.writeVarIntNum(attributeKeys.length);
+      for (const attrKey of attributeKeys) {
+        paramWriter.writeVarIntNum(attrKey.length);
+        paramWriter.write(toUint8Array(attrKey, "utf8"));
+        paramWriter.writeVarIntNum(args.attributes[attrKey].length);
+        paramWriter.write(toUint8Array(args.attributes[attrKey], "utf8"));
+      }
+      if (typeof args.limit === "number") {
+        paramWriter.writeVarIntNum(args.limit);
+      } else {
+        paramWriter.writeVarIntNum(-1);
+      }
+      if (typeof args.offset === "number") {
+        paramWriter.writeVarIntNum(args.offset);
+      } else {
+        paramWriter.writeVarIntNum(-1);
+      }
+      this.writeOptionalBool(paramWriter, args.seekPermission);
+      const result = await this.transmit("discoverByAttributes", originator, paramWriter.toUint8Array());
+      return this.parseDiscoveryResult(result);
+    }
+    async isAuthenticated(args, originator) {
+      const result = await this.transmit("isAuthenticated", originator);
+      return { authenticated: result[0] === 1 };
+    }
+    async waitForAuthentication(args, originator) {
+      await this.transmit("waitForAuthentication", originator);
+      return { authenticated: true };
+    }
+    async getHeight(args, originator) {
+      const result = await this.transmit("getHeight", originator);
+      const resultReader = new ReaderUint8Array(result);
+      return {
+        height: resultReader.readVarIntNum()
+      };
+    }
+    async getHeaderForHeight(args, originator) {
+      const paramWriter = new WriterUint8Array();
+      paramWriter.writeVarIntNum(args.height);
+      const header = await this.transmit("getHeaderForHeight", originator, paramWriter.toUint8Array());
+      return {
+        header: toHex(header)
+      };
+    }
+    async getNetwork(args, originator) {
+      const net = await this.transmit("getNetwork", originator);
+      return {
+        network: net[0] === 0 ? "mainnet" : "testnet"
+      };
+    }
+    async getVersion(args, originator) {
+      const version = await this.transmit("getVersion", originator);
+      return {
+        version: toUTF8(version)
+      };
+    }
+  };
+
+  // node_modules/@bsv/sdk/dist/esm/src/wallet/substrates/HTTPWalletWire.js
+  var HTTPWalletWire = class {
+    baseUrl;
+    httpClient;
+    originator;
+    constructor(originator, baseUrl = "http://localhost:3301", httpClient) {
+      this.baseUrl = baseUrl;
+      this.httpClient = httpClient ?? globalThis.fetch.bind(globalThis);
+      this.originator = originator;
+    }
+    async transmitToWallet(message) {
+      return Array.from(await this.transmitToWalletUint8Array(Uint8Array.from(message)));
+    }
+    async transmitToWalletUint8Array(message) {
+      const messageReader = new ReaderUint8Array(message);
+      const callCode = messageReader.readUInt8();
+      const callName = WalletWireCalls_default[callCode];
+      if (callName === void 0 || callName === "") {
+        throw new Error(`Invalid call code: ${callCode}`);
+      }
+      const originatorLength = messageReader.readUInt8();
+      let originator;
+      if (originatorLength > 0) {
+        const originatorBytes = messageReader.read(originatorLength);
+        originator = toUTF8(originatorBytes);
+      }
+      const payload = messageReader.readView();
+      const response = await this.httpClient(`${this.baseUrl}/${callName}`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/octet-stream",
+          Origin: originator ?? ""
+          // ✅ Explicitly handle null/undefined cases
+        },
+        body: payload
+      });
+      const responseBuffer = await response.arrayBuffer();
+      return new Uint8Array(responseBuffer);
+    }
+  };
+
+  // node_modules/@bsv/sdk/dist/esm/src/wallet/WERR_REVIEW_ACTIONS.js
+  var WERR_REVIEW_ACTIONS = class extends Error {
+    reviewActionResults;
+    sendWithResults;
+    txid;
+    tx;
+    noSendChange;
+    code;
+    isError = true;
+    /**
+     * All parameters correspond to their comparable `createAction` or `signAction` results
+     * with the exception of `reviewActionResults`;
+     * which contains more details, particularly for double spend results.
+     */
+    constructor(reviewActionResults, sendWithResults, txid, tx, noSendChange) {
+      super("Undelayed createAction or signAction results require review.");
+      this.reviewActionResults = reviewActionResults;
+      this.sendWithResults = sendWithResults;
+      this.txid = txid;
+      this.tx = tx;
+      this.noSendChange = noSendChange;
+      this.code = 5;
+      this.name = this.constructor.name;
+    }
+  };
+
+  // node_modules/@bsv/sdk/dist/esm/src/wallet/substrates/utils/toOriginHeader.js
+  function toOriginHeader(originator, fallbackScheme = "http") {
+    if (/^[a-z][a-z0-9+.-]*:\/\//i.test(originator)) {
+      try {
+        return new URL(originator).origin;
+      } catch {
+      }
+    }
+    try {
+      return new URL(`${fallbackScheme}://${originator}`).origin;
+    } catch {
+      throw new Error(`Invalid originator value: ${originator}`);
+    }
+  }
+
+  // node_modules/@bsv/sdk/dist/esm/src/wallet/WERR_INSUFFICIENT_FUNDS.js
+  var WERR_INSUFFICIENT_FUNDS = class extends Error {
+    totalSatoshisNeeded;
+    moreSatoshisNeeded;
+    code;
+    isError = true;
+    /**
+     * @param totalSatoshisNeeded Total satoshis required to fund transactions after net of required inputs and outputs.
+     * @param moreSatoshisNeeded Shortfall on total satoshis required to fund transactions after net of required inputs and outputs.
+     */
+    constructor(totalSatoshisNeeded, moreSatoshisNeeded) {
+      super(`Insufficient funds in the available inputs to cover the cost of the required outputs and the transaction fee (${moreSatoshisNeeded} more satoshis are needed, for a total of ${totalSatoshisNeeded}), plus whatever would be required in order to pay the fee to unlock and spend the outputs used to provide the additional satoshis.`);
+      this.totalSatoshisNeeded = totalSatoshisNeeded;
+      this.moreSatoshisNeeded = moreSatoshisNeeded;
+      this.code = 7;
+      this.name = this.constructor.name;
+    }
+  };
+  var WERR_INSUFFICIENT_FUNDS_default = WERR_INSUFFICIENT_FUNDS;
+
+  // node_modules/@bsv/sdk/dist/esm/src/wallet/substrates/HTTPWalletJSON.js
+  function deserializeWalletError(data) {
+    switch (data.code) {
+      case 5:
+        return new WERR_REVIEW_ACTIONS(data.reviewActionResults, data.sendWithResults, data.txid, data.tx, data.noSendChange);
+      case 6: {
+        const error = new WERR_INVALID_PARAMETER(data.parameter);
+        error.message = data.message;
+        return error;
+      }
+      case 7:
+        return new WERR_INSUFFICIENT_FUNDS_default(data.totalSatoshisNeeded, data.moreSatoshisNeeded);
+      default:
+        return void 0;
+    }
+  }
+  var HTTPWalletJSON = class {
+    baseUrl;
+    httpClient;
+    originator;
+    api;
+    // Fixed `any` types
+    constructor(originator, baseUrl = "http://localhost:3321", httpClient = fetch) {
+      this.baseUrl = baseUrl;
+      this.originator = originator;
+      this.httpClient = httpClient;
+      const isBrowser = typeof window !== "undefined" && typeof document !== "undefined" && window.origin !== "file://";
+      this.api = async (call, args) => {
+        if (!isBrowser && !this.originator) {
+          throw new Error('HTTPWalletJSON: originator is required when using the HTTP substrate in Node.js. Pass an originator (e.g. "example.com") to the constructor.');
+        }
+        const origin = isBrowser ? void 0 : toOriginHeader(this.originator, "http");
+        const res = await httpClient(`${this.baseUrl}/${call}`, {
+          method: "POST",
+          headers: {
+            Accept: "application/json",
+            "Content-Type": "application/json",
+            ...origin ? { Origin: origin, Originator: origin } : {}
+          },
+          body: stringifyBRC100(args)
+        });
+        const data = normalizeBRC100WalletByteFields(await res.json());
+        if (!res.ok) {
+          if (res.status === 400 && data.isError) {
+            const walletError = deserializeWalletError(data);
+            if (walletError !== void 0)
+              throw walletError;
+          }
+          const err = {
+            call,
+            args,
+            message: data.message ?? `HTTP Client error ${res.status}`
+          };
+          throw new Error(stringifyBRC100(err));
+        }
+        return data;
+      };
+    }
+    async createAction(args) {
+      return await this.api("createAction", args);
+    }
+    async signAction(args) {
+      return await this.api("signAction", args);
+    }
+    async abortAction(args) {
+      return await this.api("abortAction", args);
+    }
+    async listActions(args) {
+      return await this.api("listActions", args);
+    }
+    async internalizeAction(args) {
+      return await this.api("internalizeAction", args);
+    }
+    async listOutputs(args) {
+      return await this.api("listOutputs", args);
+    }
+    async relinquishOutput(args) {
+      return await this.api("relinquishOutput", args);
+    }
+    async getPublicKey(args) {
+      return await this.api("getPublicKey", args);
+    }
+    async revealCounterpartyKeyLinkage(args) {
+      return await this.api("revealCounterpartyKeyLinkage", args);
+    }
+    async revealSpecificKeyLinkage(args) {
+      return await this.api("revealSpecificKeyLinkage", args);
+    }
+    async encrypt(args) {
+      return await this.api("encrypt", args);
+    }
+    async decrypt(args) {
+      return await this.api("decrypt", args);
+    }
+    async createHmac(args) {
+      return await this.api("createHmac", args);
+    }
+    async verifyHmac(args) {
+      return await this.api("verifyHmac", args);
+    }
+    async createSignature(args) {
+      return await this.api("createSignature", args);
+    }
+    async verifySignature(args) {
+      return await this.api("verifySignature", args);
+    }
+    async acquireCertificate(args) {
+      return await this.api("acquireCertificate", args);
+    }
+    async listCertificates(args) {
+      return await this.api("listCertificates", args);
+    }
+    async proveCertificate(args) {
+      return await this.api("proveCertificate", args);
+    }
+    async relinquishCertificate(args) {
+      return await this.api("relinquishCertificate", args);
+    }
+    async discoverByIdentityKey(args) {
+      return await this.api("discoverByIdentityKey", args);
+    }
+    async discoverByAttributes(args) {
+      return await this.api("discoverByAttributes", args);
+    }
+    async isAuthenticated(args) {
+      return await this.api("isAuthenticated", args);
+    }
+    async waitForAuthentication(args) {
+      return await this.api("waitForAuthentication", args);
+    }
+    async getHeight(args) {
+      return await this.api("getHeight", args);
+    }
+    async getHeaderForHeight(args) {
+      return await this.api("getHeaderForHeight", args);
+    }
+    async getNetwork(args) {
+      return await this.api("getNetwork", args);
+    }
+    async getVersion(args) {
+      return await this.api("getVersion", args);
+    }
+  };
+
+  // node_modules/@bsv/sdk/dist/esm/src/wallet/substrates/ReactNativeWebView.js
+  var ReactNativeWebView = class extends InvokableWalletBase {
+    domain;
+    responseTimeout;
+    constructor(domain = "*", responseTimeout) {
+      super();
+      if (typeof globalThis.window !== "object") {
+        throw new TypeError("The XDM substrate requires a global window object.");
+      }
+      if (!globalThis.window.hasOwnProperty("ReactNativeWebView")) {
+        throw new Error("The window object does not have a ReactNativeWebView property.");
+      }
+      if (typeof globalThis.window.ReactNativeWebView.postMessage !== "function") {
+        throw new TypeError("The window.ReactNativeWebView property does not seem to support postMessage calls.");
+      }
+      this.domain = normalizeOrigin(domain);
+      this.responseTimeout = responseTimeout;
+    }
+    async invoke(call, args) {
+      return await new Promise((resolve, reject) => {
+        const id = toBase64(Random_default(12));
+        let timeoutHandle;
+        const cleanup = () => {
+          if (timeoutHandle !== void 0)
+            clearTimeout(timeoutHandle);
+          if (typeof globalThis.window.removeEventListener === "function") {
+            globalThis.window.removeEventListener("message", listener);
+          }
+        };
+        const listener = (e) => {
+          if (!isBridgeDelivered(e, this.domain)) {
+            return;
+          }
+          let data;
+          try {
+            data = JSON.parse(e.data);
+          } catch {
+            return;
+          }
+          if (data?.type !== "CWI" || data.id !== id || data.isInvocation === true) {
+            return;
+          }
+          if (this.domain !== "*" && e.origin != null && e.origin !== "" && e.origin !== this.domain) {
+            cleanup();
+            reject(new Error(`React Native wallet response origin ${e.origin} did not match ${this.domain}.`));
+            return;
+          }
+          cleanup();
+          normalizeBRC100WalletByteFields(data.result);
+          if (data.status === "error") {
+            const err = new WalletError(data.description, data.code);
+            reject(err);
+          } else {
+            resolve(data.result);
+          }
+        };
+        globalThis.window.addEventListener("message", listener);
+        if (this.responseTimeout !== void 0) {
+          timeoutHandle = setTimeout(() => {
+            cleanup();
+            reject(new Error("React Native wallet response timed out."));
+          }, this.responseTimeout);
+        }
+        try {
+          const message = stringifyBRC100({
+            type: "CWI",
+            isInvocation: true,
+            id,
+            call,
+            args
+          });
+          globalThis.window.ReactNativeWebView.postMessage(message);
+        } catch (error) {
+          cleanup();
+          reject(error);
+        }
+      });
+    }
+  };
+  function isBridgeDelivered(e, domain) {
+    const win = globalThis.window;
+    const from = e.source;
+    if (from == null || from === win)
+      return true;
+    return from === win.parent && (e.origin === win.origin || e.origin === domain);
+  }
+  function normalizeOrigin(domain) {
+    if (domain === "*")
+      return domain;
+    try {
+      if (/^[a-z][a-z\d+.-]*:\/\//i.test(domain) && !/^https?:\/\//i.test(domain)) {
+        throw new TypeError("Only HTTP(S) origins are supported.");
+      }
+      const candidate = /^https?:\/\//i.test(domain) ? domain : `https://${domain}`;
+      const origin = new URL(candidate).origin;
+      if (origin === "null")
+        throw new TypeError("The origin could not be normalized.");
+      return origin;
+    } catch {
+      throw new TypeError("ReactNativeWebView domain must be an HTTP(S) origin or domain name.");
+    }
+  }
+
   // node_modules/@bsv/sdk/dist/esm/src/wallet/WalletClient.js
+  var MAX_FAST_SUBSTRATE_RESPONSE_WAIT = 1e3;
   var MAX_XDM_RESPONSE_WAIT = 200;
   var WalletClient = class {
     substrate;
@@ -18525,7 +20377,7 @@ ${t.inputTxids.map((it) => `      '${it}'`).join(",\n")}
       if (substrate === "json-api")
         substrate = new HTTPWalletJSON(originator);
       if (substrate === "react-native")
-        substrate = new ReactNativeWebView(originator);
+        substrate = new ReactNativeWebView();
       if (substrate === "secure-json-api")
         substrate = new HTTPWalletJSON(originator, "https://localhost:2121");
       this.substrate = substrate;
@@ -18539,11 +20391,19 @@ ${t.inputTxids.map((it) => `      '${it}'`).join(",\n")}
         try {
           const sub = factory();
           let result;
+          let timeoutHandle;
           if (typeof timeout === "number") {
-            result = await Promise.race([
-              sub.getVersion({}),
-              new Promise((_resolve, reject) => setTimeout(() => reject(new Error("Timed out.")), timeout))
-            ]);
+            try {
+              result = await Promise.race([
+                sub.getVersion({}),
+                new Promise((_resolve, reject) => {
+                  timeoutHandle = setTimeout(() => reject(new Error("Timed out.")), timeout);
+                })
+              ]);
+            } finally {
+              if (timeoutHandle !== void 0)
+                clearTimeout(timeoutHandle);
+            }
           } else {
             result = await sub.getVersion({});
           }
@@ -18556,11 +20416,11 @@ ${t.inputTxids.map((it) => `      '${it}'`).join(",\n")}
         }
       };
       const fastAttempts = [
-        attemptSubstrate(() => new WindowCWISubstrate()),
-        attemptSubstrate(() => new WalletWireTransceiver(new HTTPWalletWire(this.originator))),
-        attemptSubstrate(() => new HTTPWalletJSON(this.originator, "https://localhost:2121")),
-        attemptSubstrate(() => new HTTPWalletJSON(this.originator)),
-        attemptSubstrate(() => new ReactNativeWebView(this.originator))
+        attemptSubstrate(() => new WindowCWISubstrate(), MAX_FAST_SUBSTRATE_RESPONSE_WAIT),
+        attemptSubstrate(() => new WalletWireTransceiver(new HTTPWalletWire(this.originator)), MAX_FAST_SUBSTRATE_RESPONSE_WAIT),
+        attemptSubstrate(() => new HTTPWalletJSON(this.originator, "https://localhost:2121"), MAX_FAST_SUBSTRATE_RESPONSE_WAIT),
+        attemptSubstrate(() => new HTTPWalletJSON(this.originator), MAX_FAST_SUBSTRATE_RESPONSE_WAIT),
+        attemptSubstrate(() => new ReactNativeWebView("*", MAX_FAST_SUBSTRATE_RESPONSE_WAIT), MAX_FAST_SUBSTRATE_RESPONSE_WAIT)
       ];
       const fastResults = await Promise.allSettled(fastAttempts);
       const fastSuccessful = fastResults.filter((r2) => r2.status === "fulfilled" && r2.value.success && r2.value.sub !== void 0).map((r2) => r2.value.sub);
@@ -18708,223 +20568,7 @@ ${t.inputTxids.map((it) => `      '${it}'`).join(",\n")}
     }
   };
 
-  // node_modules/@bsv/sdk/dist/esm/src/auth/Peer.js
-  var BufferCtor4 = typeof globalThis !== "undefined" ? globalThis.Buffer : void 0;
-
-  // node_modules/@bsv/sdk/dist/esm/src/auth/transports/SimplifiedFetchTransport.js
-  var defaultFetch = typeof globalThis !== "undefined" && typeof globalThis.fetch === "function" ? globalThis.fetch.bind(globalThis) : fetch;
-
-  // node_modules/@bsv/sdk/dist/esm/src/overlay-tools/HostReputationTracker.js
-  var DEFAULT_LATENCY_MS = 1500;
-  var LATENCY_SMOOTHING_FACTOR = 0.25;
-  var BASE_BACKOFF_MS = 1e3;
-  var MAX_BACKOFF_MS = 6e4;
-  var FAILURE_PENALTY_MS = 400;
-  var SUCCESS_BONUS_MS = 30;
-  var FAILURE_BACKOFF_GRACE = 2;
-  var STORAGE_KEY = "bsvsdk_overlay_host_reputation_v1";
-  var HostReputationTracker = class {
-    stats;
-    store;
-    constructor(store) {
-      this.stats = /* @__PURE__ */ new Map();
-      this.store = store ?? this.getLocalStorageAdapter();
-      this.loadFromStorage();
-    }
-    reset() {
-      this.stats.clear();
-    }
-    recordSuccess(host, latencyMs) {
-      const entry = this.getOrCreate(host);
-      const now = Date.now();
-      const safeLatency = Number.isFinite(latencyMs) && latencyMs >= 0 ? latencyMs : DEFAULT_LATENCY_MS;
-      if (entry.avgLatencyMs === null) {
-        entry.avgLatencyMs = safeLatency;
-      } else {
-        entry.avgLatencyMs = (1 - LATENCY_SMOOTHING_FACTOR) * entry.avgLatencyMs + LATENCY_SMOOTHING_FACTOR * safeLatency;
-      }
-      entry.lastLatencyMs = safeLatency;
-      entry.totalSuccesses += 1;
-      entry.consecutiveFailures = 0;
-      entry.backoffUntil = 0;
-      entry.lastUpdatedAt = now;
-      entry.lastError = void 0;
-      this.saveToStorage();
-    }
-    recordFailure(host, reason) {
-      const entry = this.getOrCreate(host);
-      const now = Date.now();
-      entry.totalFailures += 1;
-      entry.consecutiveFailures += 1;
-      let msg;
-      if (typeof reason === "string") {
-        msg = reason;
-      } else if (reason instanceof Error) {
-        msg = reason.message;
-      } else {
-        msg = void 0;
-      }
-      const immediate = typeof msg === "string" && (msg.includes("ERR_NAME_NOT_RESOLVED") || msg.includes("ENOTFOUND") || msg.includes("getaddrinfo") || msg.includes("Failed to fetch"));
-      if (immediate && entry.consecutiveFailures < FAILURE_BACKOFF_GRACE + 1) {
-        entry.consecutiveFailures = FAILURE_BACKOFF_GRACE + 1;
-      }
-      const penaltyLevel = Math.max(entry.consecutiveFailures - FAILURE_BACKOFF_GRACE, 0);
-      if (penaltyLevel === 0) {
-        entry.backoffUntil = 0;
-      } else {
-        const backoffDuration = Math.min(MAX_BACKOFF_MS, BASE_BACKOFF_MS * Math.pow(2, penaltyLevel - 1));
-        entry.backoffUntil = now + backoffDuration;
-      }
-      entry.lastUpdatedAt = now;
-      if (typeof reason === "string") {
-        entry.lastError = reason;
-      } else if (reason instanceof Error) {
-        entry.lastError = reason.message;
-      } else {
-        entry.lastError = void 0;
-      }
-      this.saveToStorage();
-    }
-    rankHosts(hosts, now = Date.now()) {
-      const seen = /* @__PURE__ */ new Map();
-      hosts.forEach((host, idx) => {
-        if (typeof host !== "string" || host.length === 0)
-          return;
-        if (!seen.has(host))
-          seen.set(host, idx);
-      });
-      const orderedHosts = Array.from(seen.keys());
-      const ranked = orderedHosts.map((host) => {
-        const entry = this.getOrCreate(host);
-        return {
-          ...entry,
-          score: this.computeScore(entry, now),
-          originalOrder: seen.get(host) ?? 0
-        };
-      });
-      ranked.sort((a, b) => {
-        const aInBackoff = a.backoffUntil > now;
-        const bInBackoff = b.backoffUntil > now;
-        if (aInBackoff !== bInBackoff)
-          return aInBackoff ? 1 : -1;
-        if (a.score !== b.score)
-          return a.score - b.score;
-        if (a.totalSuccesses !== b.totalSuccesses)
-          return b.totalSuccesses - a.totalSuccesses;
-        return a.originalOrder - b.originalOrder;
-      });
-      return ranked.map(({ originalOrder, ...rest }) => rest);
-    }
-    snapshot(host) {
-      const entry = this.stats.get(host);
-      return entry == null ? void 0 : { ...entry };
-    }
-    getStorage() {
-      try {
-        const g = typeof globalThis === "object" ? globalThis : void 0;
-        if (g?.localStorage == null)
-          return void 0;
-        return g.localStorage;
-      } catch {
-        return void 0;
-      }
-    }
-    getLocalStorageAdapter() {
-      const s2 = this.getStorage();
-      if (s2 == null)
-        return void 0;
-      return {
-        get: (key) => {
-          try {
-            return s2.getItem(key);
-          } catch {
-            return null;
-          }
-        },
-        set: (key, value) => {
-          try {
-            s2.setItem(key, value);
-          } catch {
-          }
-        }
-      };
-    }
-    loadFromStorage() {
-      const s2 = this.store;
-      if (s2 == null)
-        return;
-      try {
-        const raw = s2.get(STORAGE_KEY);
-        if (typeof raw !== "string" || raw.length === 0)
-          return;
-        const data = JSON.parse(raw);
-        if (typeof data !== "object" || data === null)
-          return;
-        this.stats.clear();
-        for (const k of Object.keys(data)) {
-          const v = data[k];
-          if (v != null && typeof v === "object") {
-            const entry = {
-              host: String(v.host ?? k),
-              totalSuccesses: Number(v.totalSuccesses ?? 0),
-              totalFailures: Number(v.totalFailures ?? 0),
-              consecutiveFailures: Number(v.consecutiveFailures ?? 0),
-              avgLatencyMs: v.avgLatencyMs == null ? null : Number(v.avgLatencyMs),
-              lastLatencyMs: v.lastLatencyMs == null ? null : Number(v.lastLatencyMs),
-              backoffUntil: Number(v.backoffUntil ?? 0),
-              lastUpdatedAt: Number(v.lastUpdatedAt ?? 0),
-              lastError: typeof v.lastError === "string" ? v.lastError : void 0
-            };
-            this.stats.set(entry.host, entry);
-          }
-        }
-      } catch {
-      }
-    }
-    saveToStorage() {
-      const s2 = this.store;
-      if (s2 == null)
-        return;
-      try {
-        const obj = {};
-        for (const [host, entry] of this.stats.entries()) {
-          obj[host] = entry;
-        }
-        s2.set(STORAGE_KEY, JSON.stringify(obj));
-      } catch {
-      }
-    }
-    computeScore(entry, now) {
-      const latency = entry.avgLatencyMs ?? DEFAULT_LATENCY_MS;
-      const failurePenalty = entry.consecutiveFailures * FAILURE_PENALTY_MS;
-      const successBonus = Math.min(entry.totalSuccesses * SUCCESS_BONUS_MS, latency / 2);
-      const backoffPenalty = entry.backoffUntil > now ? entry.backoffUntil - now : 0;
-      return latency + failurePenalty + backoffPenalty - successBonus;
-    }
-    getOrCreate(host) {
-      let entry = this.stats.get(host);
-      if (entry == null) {
-        entry = {
-          host,
-          totalSuccesses: 0,
-          totalFailures: 0,
-          consecutiveFailures: 0,
-          avgLatencyMs: null,
-          lastLatencyMs: null,
-          backoffUntil: 0,
-          lastUpdatedAt: 0
-        };
-        this.stats.set(host, entry);
-      }
-      return entry;
-    }
-  };
-  var globalTracker = new HostReputationTracker();
-
-  // node_modules/@bsv/sdk/dist/esm/src/overlay-tools/LookupResolver.js
-  var defaultFetch2 = typeof globalThis !== "undefined" && typeof globalThis.fetch === "function" ? globalThis.fetch.bind(globalThis) : fetch;
-
-  // node_modules/@bsv/402-pay/dist/constants.js
+  // node_modules/@bsv/402-pay/dist/constants-CYUQID22.mjs
   var BRC29_PROTOCOL_ID = [2, "3241645161d8"];
   var HEADER_PREFIX = "x-bsv-";
   var HEADERS = {
@@ -18944,8 +20588,9 @@ ${t.inputTxids.map((it) => `      '${it}'`).join(",\n")}
     VOUT: `${HEADER_PREFIX}vout`
   };
 
-  // node_modules/@bsv/402-pay/dist/client.js
+  // node_modules/@bsv/402-pay/dist/client.mjs
   async function constructPaymentHeaders(wallet, url, satoshis, serverIdentityKey) {
+    if (!Number.isSafeInteger(satoshis) || satoshis <= 0) throw new RangeError("Payment price must be a positive safe integer");
     const originator = new URL(url).origin;
     const nonce = utils_exports.toBase64(Random_default(8));
     const time = String(Date.now());
