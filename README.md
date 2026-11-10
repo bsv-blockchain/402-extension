@@ -107,4 +107,4 @@ This watches for source changes and rebuilds `dist/background.js` automatically.
 
 ## License
 
-Open BSV License.
+Apache License 2.0.
